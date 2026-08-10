@@ -3,7 +3,17 @@ from __future__ import annotations
 import pytest
 
 from scoreboard.devin import FakeDevinClient, SessionState, SessionSummary
-from scoreboard.flow import build_edges, funnel, reconciles
+from scoreboard.flow import (
+    NODE_ADMITTED,
+    NODE_AWAITING_AUTHORSHIP,
+    NODE_DELIVERED,
+    NODE_ERRORED,
+    NODE_ESCALATED,
+    NODE_IN_FLIGHT,
+    build_edges,
+    funnel,
+    reconciles,
+)
 from scoreboard.github import WriteNotPermittedError
 from scoreboard.models import Decision, TaskState
 from scoreboard.orchestrator import Orchestrator, build_prompt
@@ -119,6 +129,28 @@ def test_sankey_edges_carry_the_stream(store: FactStore, scope: ScopeConfig) -> 
     edges = build_edges(store)
     assert edges
     assert {edge.stream for edge in edges} == {"bugfix"}
+
+
+def test_admitted_work_reaches_its_outcome_through_in_flight(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """`In flight` is a stage every admitted task crosses, not a sibling of the outcomes."""
+    runner = orchestrator(store, scope, dry_run=False)
+    for number in range(8):
+        runner.handle(make_event(number=number, labels=["bug"]))
+
+    edges = build_edges(store)
+    admitted = sum(e.task_count for e in edges if e.target == NODE_ADMITTED)
+    into_flight = sum(
+        e.task_count for e in edges if e.source == NODE_ADMITTED and e.target == NODE_IN_FLIGHT
+    )
+    assert admitted == into_flight
+    assert not [e for e in edges if e.source == NODE_ADMITTED and e.target != NODE_IN_FLIGHT]
+
+    outcomes = {NODE_DELIVERED, NODE_AWAITING_AUTHORSHIP, NODE_ESCALATED, NODE_ERRORED}
+    reached = {e.target for e in edges if e.target in outcomes}
+    assert reached
+    assert all(e.source == NODE_IN_FLIGHT for e in edges if e.target in outcomes)
 
 
 class WorkingThenFinished(FakeDevinClient):
