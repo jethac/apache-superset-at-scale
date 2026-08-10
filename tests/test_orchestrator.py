@@ -10,6 +10,7 @@ from scoreboard.flow import (
     NODE_ERRORED,
     NODE_ESCALATED,
     NODE_IN_FLIGHT,
+    NODE_QUEUED,
     build_edges,
     funnel,
     reconciles,
@@ -226,6 +227,58 @@ def test_queued_work_is_dispatched_on_the_next_sighting_once_there_is_room(
 
     assert dispatched.session_id is not None
     assert len(runner.devin.sessions) == 1  # type: ignore[union-attr]
+
+
+class SilentAboutCost(FakeDevinClient):
+    """A session the API reports no ACU figure for, as it does while one is still running."""
+
+    def create_session(self, request: object) -> SessionState:  # type: ignore[override]
+        return SessionState(
+            session_id="s-costless",
+            status="running",
+            status_detail="working",
+            pr_url=None,
+            acus_consumed=None,
+            structured_output={},
+        )
+
+    def get_session(self, session_id: str) -> SessionState:
+        return SessionState(
+            session_id=session_id,
+            status="blocked",
+            status_detail="finished",
+            pr_url="https://github.com/jethac/superset/pull/99",
+            acus_consumed=None,
+            structured_output={"outcome": "pr_opened"},
+        )
+
+
+def test_an_unreported_acu_figure_stays_unreported_rather_than_becoming_zero(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """Zero ACUs is a claim that the work was free; absent data is not that claim."""
+    runner = Orchestrator(scope=scope, store=store, devin=SilentAboutCost(), dry_run=False)
+    task = runner.handle(make_event(labels=["bug"]))
+    runner.sync()
+
+    rows = store.query("SELECT acus_consumed FROM fact_task WHERE task_id = ?", (task.task_id,))
+    assert rows[0]["acus_consumed"] is None
+
+
+def test_work_waiting_for_capacity_is_queued_rather_than_counted_as_a_running_session(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """A queue is not a fleet: work with no session must not inflate what is in flight."""
+    runner = orchestrator(store, _capped(scope, 0), dry_run=False)
+    runner.handle(make_event(labels=["bug"]))
+
+    counts = funnel(store)
+    assert counts["queued"] == 1
+    assert counts["in_flight"] == 0
+    assert reconciles(counts)
+
+    edges = build_edges(store)
+    assert [e.target for e in edges if e.source == NODE_ADMITTED] == [NODE_QUEUED]
 
 
 def test_an_issue_filtered_under_older_rules_is_admitted_once_the_rules_widen(

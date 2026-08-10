@@ -160,6 +160,7 @@ FUNNEL_STAGES: tuple[tuple[str, str], ...] = (
     ("filtered", "Filtered (out of scope)"),
     ("deduped", "Deduped"),
     ("admitted", "Admitted"),
+    ("queued", "Queued for capacity"),
     ("in_flight", "In flight"),
     ("work_delivered", "Work delivered"),
     ("awaiting_authorship", "Draft awaiting authorship"),

@@ -261,7 +261,9 @@ Conditions: `repo`, `event_type`, `labels_any`, `labels_none`, `title_regex`,
 caps how many sessions run at once; admitted work over the cap keeps its verdict
 and waits, and a later intake pass starts it when the fleet has room. A backlog
 filed in one afternoon therefore costs its ACUs at a rate a human can still
-intervene in. Routing is also re-evaluated on every sighting of work that has
+intervene in. The funnel counts that waiting work as `queued for capacity`
+rather than `in flight`, so the fleet number matches the sessions the Devin app
+shows running. Routing is also re-evaluated on every sighting of work that has
 not started yet, so widening a rule picks up issues that were already seen and
 filtered — a rule edit does not need a database edit to take effect.
 

@@ -215,7 +215,7 @@ class Orchestrator:
                 state=resolved.value,
                 pr_url=state.pr_url,
                 pr_is_draft=is_draft,
-                acus_consumed=state.acus_consumed or 0.0,
+                acus_consumed=state.acus_consumed,
                 updated_at=moment,
             )
             logger.info("%s -> %s (session %s)", row["task_id"], resolved.value, session_id)
