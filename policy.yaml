@@ -1,0 +1,88 @@
+# Contribution policy, per target repository.
+#
+# Target projects publish rules about AI-assisted contributions. Encoding them here means the
+# deployment applies them at intake (they go into the session prompt) and checks them at submit
+# time, rather than relying on whoever is operating it to remember.
+#
+# Sources for the `apache/superset` profile:
+#   https://www.apache.org/legal/generative-tooling.html
+#   https://github.com/apache/superset/wiki/New-Contributor-Welcome-&-Expectations
+#   apache/superset SECURITY.md
+
+version: 1
+
+defaults:
+  profile: permissive
+
+profiles:
+  permissive:
+    description: Internal repositories with no published AI contribution policy.
+    tone:
+      # Injected into the session prompt verbatim.
+      guidance:
+        - Write plainly. State what changed and why, then stop.
+        - Lead with evidence — measured numbers, file paths, commands run.
+        - Name the limitations of the change. Do not sell it.
+      banned_openers:
+        - Great point
+        - You're absolutely right
+        - Happy to help
+        - I hope this helps
+      banned_phrases:
+        - comprehensive solution
+        - robust and scalable
+        - seamlessly integrates
+        - best practices
+    contribution:
+      open_as_draft: false
+      require_generated_by_trailer: false
+      require_ai_disclosure: false
+      require_human_authorship: false
+      require_local_test_evidence: false
+      require_adversarial_review: false
+    signoff:
+      default_author: jethac
+
+  asf-superset:
+    description: >-
+      Apache Superset. The wiki expectations are enforced socially: PRs that read as entirely
+      machine-written are tagged `lacks-human-authorship` and closed, so the authorship paragraph
+      is a merge blocker rather than a nicety.
+    tone:
+      guidance:
+        - Write plainly. State what changed and why, then stop.
+        - Lead with evidence — measured numbers, file paths, commands run.
+        - Name the limitations of the change and any measurement discontinuity it introduces.
+        - Do not open with agreement or thanks. Do not restate the issue back at the reader.
+      banned_openers:
+        - Great point
+        - You're absolutely right
+        - Happy to help
+        - I hope this helps
+      banned_phrases:
+        - comprehensive solution
+        - robust and scalable
+        - seamlessly integrates
+        - I've carefully
+    contribution:
+      # The agent opens the PR as a draft and moves on. A draft is not a request for review, so
+      # it costs no reviewer attention while it waits for the authorship paragraph.
+      open_as_draft: true
+      require_generated_by_trailer: true
+      require_ai_disclosure: true
+      require_human_authorship: true
+      require_local_test_evidence: true
+      require_adversarial_review: true
+      pr_template: .github/PULL_REQUEST_TEMPLATE.md
+      # Minimum is one sentence, not a word count. A length floor invites padding, which is the
+      # failure mode the policy exists to prevent.
+      authorship_min_sentences: 1
+    signoff:
+      # Whoever writes the authorship paragraph is the human attesting to the change, so the
+      # sign-off is recorded from the outbox submission rather than collected separately.
+      default_author: jethac
+
+repositories:
+  jethac/superset: asf-superset
+  apache/superset: asf-superset
+  jethac/apache-superset-at-scale: permissive

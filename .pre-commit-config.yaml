@@ -1,0 +1,37 @@
+# Hook repositories are pinned to immutable commit SHAs, not tags: a tag can be
+# repointed at malicious code without any local change being visible.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 89c421dff2e1026ba12cdb9ebd731f4a83aa8021  # v0.8.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: bbc3dc1f890007061f18f17e2334f216ea9e5df7  # v1.14.1
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - fastapi==0.115.6
+          - httpx==0.28.1
+          - pydantic==2.10.4
+          - types-pyyaml==6.0.12.20241230
+          - uvicorn==0.34.0
+        args: [--strict]
+        files: ^src/
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 4b720c2674b640d046dadf45c2bc5173ee3734a4  # v8.29.1
+    hooks:
+      - id: gitleaks

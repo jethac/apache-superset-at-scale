@@ -1,0 +1,61 @@
+services:
+  scoreboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fde-scoreboard:local
+    # Credentials are read from a local .env that is never committed or baked
+    # into the image. `scoreboard init` writes it with 0600 permissions.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DB_PATH: /data/facts.db
+      SCOPE_PATH: /app/scope.yaml
+      POLICY_PATH: /app/policy.yaml
+      # Fail closed: nothing is created on GitHub or Devin until this is
+      # explicitly set to false.
+      DRY_RUN: ${DRY_RUN:-true}
+      ALLOW_UPSTREAM_WRITE: ${ALLOW_UPSTREAM_WRITE:-false}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - facts:/data
+      - ./scope.yaml:/app/scope.yaml:ro
+      - ./policy.yaml:/app/policy.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # One-shot offline demo: no credentials, no network calls.
+  simulate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fde-scoreboard:local
+    profiles: ["demo"]
+    environment:
+      DB_PATH: /data/facts.db
+      SCOPE_PATH: /app/scope.yaml
+      POLICY_PATH: /app/policy.yaml
+    command: ["simulate", "--events", "48"]
+    volumes:
+      - facts:/data
+      - ./scope.yaml:/app/scope.yaml:ro
+      - ./policy.yaml:/app/policy.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+
+volumes:
+  facts:
