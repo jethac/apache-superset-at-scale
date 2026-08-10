@@ -26,6 +26,7 @@ def client(tmp_path: Path) -> TestClient:
         github_api_url="https://api.github.com",
         webhook_secret=SECRET,
         scope_path=REPO_ROOT / "scope.yaml",
+        policy_path=REPO_ROOT / "policy.yaml",
         db_path=tmp_path / "facts.db",
         dry_run=True,
         allow_upstream_write=False,
@@ -79,3 +80,27 @@ def test_funnel_endpoint_counts_the_delivery(client: TestClient) -> None:
     post(client, ISSUE_PAYLOAD)
     counts = client.get("/funnel").json()
     assert counts["triggered"] == 1
+
+
+def test_outbox_is_empty_until_a_draft_is_delivered(client: TestClient) -> None:
+    assert client.get("/outbox").json() == []
+
+
+def test_health_lists_the_loaded_policy_profiles(client: TestClient) -> None:
+    assert "asf-superset" in client.get("/health").json()["policy_profiles"]
+
+
+def test_authorship_input_method_is_constrained(client: TestClient) -> None:
+    response = client.post(
+        "/outbox/whatever/authorship",
+        json={"text": "words", "author": "jethac", "input_method": "generated"},
+    )
+    assert response.status_code == 422
+
+
+def test_unknown_task_authorship_is_not_found(client: TestClient) -> None:
+    response = client.post(
+        "/outbox/whatever/authorship",
+        json={"text": "words", "author": "jethac", "input_method": "dictated"},
+    )
+    assert response.status_code == 404

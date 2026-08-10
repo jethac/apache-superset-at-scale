@@ -22,6 +22,7 @@ NODE_ADMITTED = "Admitted"
 NODE_FILTERED = "Filtered (out of scope)"
 NODE_DEDUPED = "Deduped"
 NODE_DELIVERED = "Work delivered"
+NODE_AWAITING_AUTHORSHIP = "Draft awaiting authorship"
 NODE_ESCALATED = "Escalated to human"
 NODE_ERRORED = "Errored"
 NODE_IN_FLIGHT = "In flight"
@@ -37,6 +38,7 @@ class FlowEdge:
 
 _TERMINALS: dict[TaskState, str] = {
     TaskState.WORK_DELIVERED: NODE_DELIVERED,
+    TaskState.DRAFT_AWAITING_AUTHORSHIP: NODE_AWAITING_AUTHORSHIP,
     TaskState.ESCALATED: NODE_ESCALATED,
     TaskState.ERRORED: NODE_ERRORED,
     TaskState.SESSION_STARTED: NODE_IN_FLIGHT,
@@ -84,6 +86,7 @@ def funnel(store: FactStore) -> dict[str, int]:
         "deduped": by_state.get(TaskState.DEDUPED.value, 0),
         "admitted": admitted,
         "work_delivered": by_state.get(TaskState.WORK_DELIVERED.value, 0),
+        "awaiting_authorship": by_state.get(TaskState.DRAFT_AWAITING_AUTHORSHIP.value, 0),
         "escalated": by_state.get(TaskState.ESCALATED.value, 0),
         "errored": by_state.get(TaskState.ERRORED.value, 0),
         "in_flight": by_state.get(TaskState.SESSION_STARTED.value, 0)
@@ -97,6 +100,7 @@ def reconciles(counts: dict[str, int]) -> bool:
         counts["filtered"]
         + counts["deduped"]
         + counts["work_delivered"]
+        + counts["awaiting_authorship"]
         + counts["escalated"]
         + counts["errored"]
         + counts["in_flight"]

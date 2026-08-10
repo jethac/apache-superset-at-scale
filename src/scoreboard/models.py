@@ -102,9 +102,24 @@ class TaskState(str, Enum):
     FILTERED = "filtered"
     DEDUPED = "deduped"
     SESSION_STARTED = "session_started"
+    DRAFT_AWAITING_AUTHORSHIP = "draft_awaiting_authorship"
     WORK_DELIVERED = "work_delivered"
     ESCALATED = "escalated"
     ERRORED = "errored"
+
+
+class Authorship(BaseModel):
+    """The human-written paragraph a draft is waiting on, stored exactly as it was supplied.
+
+    `input_method` is recorded because dictated text arrives as one unpunctuated block and would
+    otherwise look like a policy violation, and because how the text came to exist is part of the
+    evidence that a human wrote it.
+    """
+
+    text: str
+    author: str
+    input_method: str = "typed"
+    recorded_at: datetime
 
 
 class Task(BaseModel):
@@ -114,6 +129,8 @@ class Task(BaseModel):
     state: TaskState
     session_id: str | None = None
     pr_url: str | None = None
+    pr_is_draft: bool = False
+    policy_profile: str | None = None
     acus_consumed: float | None = None
     created_at: datetime
     updated_at: datetime

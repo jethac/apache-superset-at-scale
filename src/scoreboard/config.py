@@ -27,6 +27,7 @@ class Settings:
     github_api_url: str
     webhook_secret: str | None
     scope_path: Path
+    policy_path: Path
     db_path: Path
     dry_run: bool
     allow_upstream_write: bool
@@ -41,6 +42,7 @@ class Settings:
             github_api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
             webhook_secret=os.environ.get("WEBHOOK_SECRET"),
             scope_path=Path(os.environ.get("SCOPE_PATH", "scope.yaml")),
+            policy_path=Path(os.environ.get("POLICY_PATH", "policy.yaml")),
             db_path=Path(os.environ.get("DB_PATH", "data/facts.db")),
             dry_run=_flag("DRY_RUN", True),
             allow_upstream_write=_flag("ALLOW_UPSTREAM_WRITE", False),

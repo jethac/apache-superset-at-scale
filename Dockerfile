@@ -30,7 +30,8 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DB_PATH=/data/facts.db \
-    SCOPE_PATH=/app/scope.yaml
+    SCOPE_PATH=/app/scope.yaml \
+    POLICY_PATH=/app/policy.yaml
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin scoreboard \
     && mkdir -p /data \
@@ -40,6 +41,7 @@ COPY --from=builder --chown=root:root /opt/venv /opt/venv
 
 WORKDIR /app
 COPY --chown=root:root scope.yaml ./scope.yaml
+COPY --chown=root:root policy.yaml ./policy.yaml
 
 USER scoreboard
 EXPOSE 8000

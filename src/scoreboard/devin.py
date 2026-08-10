@@ -219,6 +219,22 @@ class FakeDevinClient:
                 "outcome": outcome,
                 "summary": f"simulated {outcome}",
                 "pr_url": pr_url,
+                # A real session reports the artefacts the contribution policy is checked
+                # against. The fake reports them too, so the offline run exercises the policy
+                # path rather than skipping it.
+                "pr_body": (
+                    "### SUMMARY\n\nSimulated change.\n\n### AI DISCLOSURE\n\n"
+                    "Authored with AI assistance (Devin).\n\n### AUTHOR'S NOTE\n\n_(pending)_\n"
+                    if pr_url
+                    else ""
+                ),
+                "commit_message": (
+                    f"fix: simulated change {index}\n\nGenerated-by: Devin (Cognition)"
+                    if pr_url
+                    else ""
+                ),
+                "tests_run": bool(pr_url),
+                "adversarial_review_run": bool(pr_url),
             },
             url=f"https://app.devin.ai/sessions/{session_id}",
         )

@@ -102,6 +102,9 @@ Then point a GitHub webhook at `POST /webhook/github` with content type
 | --- | --- |
 | `GET /health` | Liveness; also the container health check. |
 | `GET /funnel` | Current funnel counts and reconciliation status. |
+| `GET /outbox` | Draft pull requests waiting on a human authorship paragraph. |
+| `POST /outbox/{task_id}/authorship` | Submit that paragraph and mark the draft ready. |
+| `GET /compliance` | Per-pull-request policy evidence: which checks ran, which passed. |
 | `POST /webhook/github` | Signed event intake. |
 
 While `DRY_RUN=true` the service routes, deduplicates and records every event
@@ -146,6 +149,43 @@ unless `ALLOW_UPSTREAM_WRITE` is explicitly set, so no rule edit alone can cause
 a PR against someone else's repository. The `age_days_min` floor on upstream
 issues is deliberate too: racing human contributors to fresh issues is the
 fastest way to make an agent deployment unwelcome in a project you do not own.
+
+## Contribution policy and the authorship outbox
+
+[`policy.yaml`](policy.yaml) holds the target project's rules for AI-assisted
+contributions, selected per repository. Apache Superset's contributor
+expectations are not advisory: a pull request that reads as entirely
+machine-written is tagged `lacks-human-authorship` and closed, so the
+deployment has to know the rules before it writes rather than after.
+
+The profile is applied twice. At intake, `prompt_section` renders it into the
+session prompt — `Generated-by:` trailer, AI disclosure section, local test
+evidence, adversarial self-review, open as draft. At submit, the same profile
+is evaluated against what came back, and every check is stored per pull request
+in `fact_policy_check`, so compliance is queryable evidence rather than a claim.
+
+What the agent cannot supply is the paragraph in a human's own voice. Rather
+than parking the session until someone is available, it opens a draft and moves
+on; the draft lands in the outbox in state `draft_awaiting_authorship`, which is
+its own node in the funnel and the Sankey. The age of that queue measures the
+operator's latency, not the deployment's.
+
+```bash
+scoreboard outbox                       # what is waiting, and for how long
+curl -X POST localhost:8000/outbox/$TASK/authorship \
+  -d '{"text": "...", "author": "jethac", "input_method": "dictated"}'
+```
+
+The text is stored verbatim alongside the author and whether it was typed or
+dictated — dictation arrives as one unpunctuated block, and how it came to exist
+is part of the evidence that a human wrote it. Submission fails on empty text,
+splices the paragraph into the pull request body unedited, and flips draft →
+ready only once every blocking check passes. Tone findings are recorded but do
+not block.
+
+There is no generate, improve, or rewrite affordance anywhere in this path, and
+`tests/test_policy.py` asserts its absence. A button that writes the paragraph
+would satisfy the check while defeating the rule it implements.
 
 ## Reporting
 

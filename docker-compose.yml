@@ -12,6 +12,7 @@ services:
     environment:
       DB_PATH: /data/facts.db
       SCOPE_PATH: /app/scope.yaml
+      POLICY_PATH: /app/policy.yaml
       # Fail closed: nothing is created on GitHub or Devin until this is
       # explicitly set to false.
       DRY_RUN: ${DRY_RUN:-true}
@@ -21,6 +22,7 @@ services:
     volumes:
       - facts:/data
       - ./scope.yaml:/app/scope.yaml:ro
+      - ./policy.yaml:/app/policy.yaml:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -40,10 +42,12 @@ services:
     environment:
       DB_PATH: /data/facts.db
       SCOPE_PATH: /app/scope.yaml
+      POLICY_PATH: /app/policy.yaml
     command: ["simulate", "--events", "48"]
     volumes:
       - facts:/data
       - ./scope.yaml:/app/scope.yaml:ro
+      - ./policy.yaml:/app/policy.yaml:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777

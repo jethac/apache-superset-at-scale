@@ -18,6 +18,8 @@ from .flow import build_edges, funnel, reconciles
 from .github import HttpGitHubClient
 from .normalize import from_github
 from .orchestrator import Orchestrator
+from .outbox import list_outbox
+from .policy import PolicyConfig
 from .scope import ScopeConfig
 from .simulate import render, run_simulation
 from .store import FactStore
@@ -50,6 +52,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("report", help="print the funnel and the Sankey edge list")
 
+    subparsers.add_parser(
+        "outbox", help="list draft pull requests waiting on a human authorship paragraph"
+    )
+
     replay = subparsers.add_parser("replay", help="route a saved webhook payload from a file")
     replay.add_argument("--event", required=True, help="GitHub event name, e.g. issues")
     replay.add_argument("path", type=Path)
@@ -71,13 +77,37 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "simulate":
         result = run_simulation(
-            settings.scope_path, settings.db_path, event_count=args.events, seed=args.seed
+            settings.scope_path,
+            settings.policy_path,
+            settings.db_path,
+            event_count=args.events,
+            seed=args.seed,
         )
         print(render(result))
         return 0 if result["reconciles"] else 1
 
     scope = ScopeConfig.load(settings.scope_path)
+    policy = PolicyConfig.load(settings.policy_path)
     store = FactStore(settings.db_path)
+
+    if args.command == "outbox":
+        items = list_outbox(store)
+        print(
+            json.dumps(
+                [
+                    {
+                        "task_id": item.task_id,
+                        "pr_url": item.pr_url,
+                        "profile": item.profile,
+                        "waiting_days": round(item.waiting_days, 2),
+                        "failing_checks": item.failing_checks,
+                    }
+                    for item in items
+                ],
+                indent=2,
+            )
+        )
+        return 0
 
     if args.command == "report":
         counts = funnel(store)
@@ -106,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         scope=scope,
         store=store,
         devin=devin,
+        policy=policy,
         dry_run=settings.dry_run,
         allow_upstream_write=settings.allow_upstream_write,
     )

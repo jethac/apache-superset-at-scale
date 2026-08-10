@@ -46,6 +46,20 @@ class GitHubClient(Protocol):
         self, repo: str, since: datetime, until: datetime
     ) -> list[PullRequestFact]: ...
 
+    def get_pull_request_body(self, repo: str, number: int) -> str: ...
+
+    def update_pull_request_body(self, repo: str, number: int, body: str) -> None: ...
+
+    def mark_ready_for_review(self, repo: str, number: int) -> None: ...
+
+
+def parse_pr_url(pr_url: str) -> tuple[str, int]:
+    """`https://github.com/owner/name/pull/12` -> `("owner/name", 12)`."""
+    parts = pr_url.rstrip("/").split("/")
+    if len(parts) < 5 or parts[-2] != "pull":
+        raise ValueError(f"not a pull request URL: {pr_url}")
+    return f"{parts[-4]}/{parts[-3]}", int(parts[-1])
+
 
 class WriteNotPermittedError(PermissionError):
     """Raised on any attempt to write to a repository the deployment may only read."""
@@ -151,6 +165,36 @@ class HttpGitHubClient:
             )
         return facts
 
+    def get_pull_request_body(self, repo: str, number: int) -> str:
+        response = self._client.get(f"/repos/{repo}/pulls/{number}")
+        response.raise_for_status()
+        return str(response.json().get("body") or "")
+
+    def update_pull_request_body(self, repo: str, number: int, body: str) -> None:
+        response = self._client.patch(f"/repos/{repo}/pulls/{number}", json={"body": body})
+        response.raise_for_status()
+
+    def mark_ready_for_review(self, repo: str, number: int) -> None:
+        """Undrafting is GraphQL-only; the REST pulls endpoint cannot clear the draft flag."""
+        node_id = self._client.get(f"/repos/{repo}/pulls/{number}").json().get("node_id")
+        if not node_id:
+            raise RuntimeError(f"could not resolve node id for {repo}#{number}")
+        response = self._client.post(
+            "/graphql",
+            json={
+                "query": (
+                    "mutation($id: ID!) {"
+                    " markPullRequestReadyForReview(input: {pullRequestId: $id})"
+                    " { pullRequest { isDraft } } }"
+                ),
+                "variables": {"id": node_id},
+            },
+        )
+        response.raise_for_status()
+        errors = response.json().get("errors")
+        if errors:
+            raise RuntimeError(f"markPullRequestReadyForReview failed: {errors}")
+
     def close(self) -> None:
         self._client.close()
 
@@ -161,6 +205,8 @@ class FakeGitHubClient:
 
     issues: dict[str, list[Event]] = field(default_factory=dict)
     pull_requests: dict[str, list[PullRequestFact]] = field(default_factory=dict)
+    bodies: dict[tuple[str, int], str] = field(default_factory=dict)
+    drafts: set[tuple[str, int]] = field(default_factory=set)
 
     def list_issues(self, repo: str, since: datetime | None = None) -> list[Event]:
         events = self.issues.get(repo, [])
@@ -174,3 +220,12 @@ class FakeGitHubClient:
         return [
             fact for fact in self.pull_requests.get(repo, []) if since <= fact.opened_at <= until
         ]
+
+    def get_pull_request_body(self, repo: str, number: int) -> str:
+        return self.bodies.get((repo, number), "")
+
+    def update_pull_request_body(self, repo: str, number: int, body: str) -> None:
+        self.bodies[(repo, number)] = body
+
+    def mark_ready_for_review(self, repo: str, number: int) -> None:
+        self.drafts.discard((repo, number))

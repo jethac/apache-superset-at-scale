@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from .devin import DevinClient, SessionRequest
 from .github import assert_writable
 from .models import Decision, Event, Task, TaskState, make_task_id
+from .policy import PolicyConfig, Profile, Submission, evaluate, prompt_section
 from .scope import ScopeConfig
 from .store import FactStore
 
@@ -33,10 +34,12 @@ Requirements:
 - Open the pull request against {target_repo}. Do not push to any other repository.
 - If the correct outcome is that no code change is needed, do not open a pull request: report
   that conclusion and the reasoning instead.
+
+{policy}
 """
 
 
-def build_prompt(event: Event, decision: Decision) -> str:
+def build_prompt(event: Event, decision: Decision, profile: Profile | None = None) -> str:
     return PROMPT_TEMPLATE.format(
         target_repo=decision.target_repo,
         source_repo=event.repo,
@@ -44,6 +47,7 @@ def build_prompt(event: Event, decision: Decision) -> str:
         title=event.title,
         url=event.url,
         body=(event.body or "").strip()[:2000],
+        policy=prompt_section(profile) if profile else "",
     )
 
 
@@ -52,6 +56,7 @@ class Orchestrator:
     scope: ScopeConfig
     store: FactStore
     devin: DevinClient
+    policy: PolicyConfig | None = None
     dry_run: bool = True
     allow_upstream_write: bool = False
 
@@ -87,6 +92,8 @@ class Orchestrator:
 
         target_repo = decision.target_repo or self.scope.defaults.target_repo
         assert_writable(target_repo, self.allow_upstream_write)
+        profile = self.policy.for_repo(target_repo) if self.policy else None
+        task.policy_profile = self.policy.profile_name_for(target_repo) if self.policy else None
 
         if self.dry_run:
             task.state = TaskState.TRIGGERED
@@ -98,7 +105,7 @@ class Orchestrator:
 
         state = self.devin.create_session(
             SessionRequest(
-                prompt=build_prompt(event, decision),
+                prompt=build_prompt(event, decision, profile),
                 tags=decision.tags,
                 playbook_id=decision.playbook_id,
                 max_acu_limit=decision.max_acu_limit,
@@ -109,8 +116,46 @@ class Orchestrator:
         task.acus_consumed = state.acus_consumed
         task.state = _state_for(state.status_detail, state.pr_url, state.structured_output)
         task.updated_at = datetime.now(UTC)
+
+        if task.pr_url and profile is not None:
+            task.state = self._apply_policy(task, profile, state.structured_output)
+
         self.store.upsert_task(task)
         return task
+
+    def _apply_policy(
+        self,
+        task: Task,
+        profile: Profile,
+        structured_output: dict[str, object] | None,
+    ) -> TaskState:
+        """Check the delivered pull request against the target's policy and record the evidence.
+
+        A draft that still needs the human authorship paragraph is not delivered work. It gets its
+        own state so the funnel shows the queue rather than counting it as finished, and so the
+        age of that queue is measurable.
+        """
+        output = structured_output or {}
+        submission = Submission(
+            pr_url=task.pr_url or "",
+            body=str(output.get("pr_body") or ""),
+            commit_message=str(output.get("commit_message") or ""),
+            authorship_text=None,
+            tests_run=bool(output.get("tests_run")),
+            adversarial_review_run=bool(output.get("adversarial_review_run")),
+        )
+        results = evaluate(profile, submission)
+        self.store.record_policy_checks(
+            task.task_id,
+            task.pr_url or "",
+            task.policy_profile or "",
+            results,
+            task.updated_at,
+        )
+        if profile.contribution.require_human_authorship:
+            task.pr_is_draft = profile.contribution.open_as_draft
+            return TaskState.DRAFT_AWAITING_AUTHORSHIP
+        return task.state
 
 
 def _state_for(

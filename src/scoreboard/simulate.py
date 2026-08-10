@@ -18,6 +18,8 @@ from .flow import build_edges, funnel, reconciles
 from .github import FakeGitHubClient, PullRequestFact
 from .models import Event, EventType, Severity, digest_payload
 from .orchestrator import Orchestrator
+from .outbox import list_outbox
+from .policy import PolicyConfig
 from .scope import ScopeConfig
 from .store import FactStore
 
@@ -110,6 +112,7 @@ def _fixture_pull_requests(repo: str, agent_pr_urls: list[str]) -> list[PullRequ
 
 def run_simulation(
     scope_path: Path,
+    policy_path: Path,
     db_path: Path,
     event_count: int = 24,
     seed: int = 7,
@@ -118,9 +121,10 @@ def run_simulation(
         db_path.unlink()
 
     scope = ScopeConfig.load(scope_path)
+    policy = PolicyConfig.load(policy_path)
     store = FactStore(db_path)
     devin = FakeDevinClient(seed=seed)
-    orchestrator = Orchestrator(scope=scope, store=store, devin=devin, dry_run=False)
+    orchestrator = Orchestrator(scope=scope, store=store, devin=devin, policy=policy, dry_run=False)
 
     events = _fixture_events(event_count, seed)
     for event in events:
@@ -144,9 +148,21 @@ def run_simulation(
 
     counts = funnel(store)
     edges = build_edges(store)
+    # The simulation deliberately leaves the outbox full. Filling it would mean generating the
+    # human authorship paragraph, which is the one thing the policy exists to prevent.
+    outbox = list_outbox(store)
     result: dict[str, object] = {
         "events": len(events),
         "pull_requests_collected": collected,
+        "outbox": [
+            {
+                "task_id": item.task_id,
+                "pr_url": item.pr_url,
+                "profile": item.profile,
+                "failing_checks": item.failing_checks,
+            }
+            for item in outbox
+        ],
         "funnel": counts,
         "reconciles": reconciles(counts),
         "sankey_edges": [

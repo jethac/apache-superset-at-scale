@@ -15,7 +15,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .github import PullRequestFact
-from .models import Task
+from .models import Authorship, Task
+from .policy import CheckResult
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS fact_event (
@@ -43,6 +44,8 @@ CREATE TABLE IF NOT EXISTS fact_task (
     state          TEXT NOT NULL,
     session_id     TEXT,
     pr_url         TEXT,
+    pr_is_draft    INTEGER NOT NULL DEFAULT 0,
+    policy_profile TEXT,
     acus_consumed  REAL,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
@@ -62,6 +65,28 @@ CREATE TABLE IF NOT EXISTS fact_pr (
     changed_files  INTEGER NOT NULL,
     review_rounds  INTEGER NOT NULL,
     first_push_checks_passed INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS fact_policy_check (
+    pr_url        TEXT NOT NULL,
+    task_id       TEXT NOT NULL,
+    profile       TEXT NOT NULL,
+    check_name    TEXT NOT NULL,
+    passed        INTEGER NOT NULL,
+    detail        TEXT NOT NULL,
+    checked_at    TEXT NOT NULL,
+    PRIMARY KEY (pr_url, check_name)
+);
+
+-- The authorship paragraph is stored verbatim. It is the evidence that a human wrote the pull
+-- request, so normalising or trimming it would destroy the thing being evidenced.
+CREATE TABLE IF NOT EXISTS fact_authorship (
+    task_id       TEXT PRIMARY KEY,
+    pr_url        TEXT NOT NULL,
+    text          TEXT NOT NULL,
+    author        TEXT NOT NULL,
+    input_method  TEXT NOT NULL,
+    recorded_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS snapshot_daily (
@@ -126,13 +151,15 @@ class FactStore:
             connection.execute(
                 """
                 INSERT INTO fact_task (task_id, event_id, repo, target_repo, stream, rule_id,
-                                       admitted, reason, state, session_id, pr_url,
-                                       acus_consumed, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       admitted, reason, state, session_id, pr_url, pr_is_draft,
+                                       policy_profile, acus_consumed, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     state=excluded.state,
                     session_id=COALESCE(excluded.session_id, fact_task.session_id),
                     pr_url=COALESCE(excluded.pr_url, fact_task.pr_url),
+                    pr_is_draft=excluded.pr_is_draft,
+                    policy_profile=COALESCE(excluded.policy_profile, fact_task.policy_profile),
                     acus_consumed=COALESCE(excluded.acus_consumed, fact_task.acus_consumed),
                     updated_at=excluded.updated_at
                 """,
@@ -148,6 +175,8 @@ class FactStore:
                     task.state.value,
                     task.session_id,
                     task.pr_url,
+                    int(task.pr_is_draft),
+                    task.policy_profile,
                     task.acus_consumed,
                     task.created_at.isoformat(),
                     task.updated_at.isoformat(),
@@ -196,6 +225,88 @@ class FactStore:
                     if fact.first_push_checks_passed is None
                     else int(fact.first_push_checks_passed),
                 ),
+            )
+
+    def record_policy_checks(
+        self,
+        task_id: str,
+        pr_url: str,
+        profile: str,
+        results: list[CheckResult],
+        checked_at: datetime,
+    ) -> None:
+        with self._tx() as connection:
+            connection.executemany(
+                """
+                INSERT INTO fact_policy_check (pr_url, task_id, profile, check_name, passed,
+                                               detail, checked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pr_url, check_name) DO UPDATE SET
+                    passed=excluded.passed,
+                    detail=excluded.detail,
+                    checked_at=excluded.checked_at
+                """,
+                [
+                    (
+                        pr_url,
+                        task_id,
+                        profile,
+                        result.name,
+                        int(result.passed),
+                        result.detail,
+                        checked_at.isoformat(),
+                    )
+                    for result in results
+                ],
+            )
+
+    def record_authorship(self, task_id: str, pr_url: str, authorship: Authorship) -> None:
+        with self._tx() as connection:
+            connection.execute(
+                """
+                INSERT INTO fact_authorship (task_id, pr_url, text, author, input_method,
+                                             recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    text=excluded.text,
+                    author=excluded.author,
+                    input_method=excluded.input_method,
+                    recorded_at=excluded.recorded_at
+                """,
+                (
+                    task_id,
+                    pr_url,
+                    authorship.text,
+                    authorship.author,
+                    authorship.input_method,
+                    authorship.recorded_at.isoformat(),
+                ),
+            )
+
+    def authorship_for(self, task_id: str) -> Authorship | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT text, author, input_method, recorded_at FROM fact_authorship"
+                " WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Authorship(
+            text=row["text"],
+            author=row["author"],
+            input_method=row["input_method"],
+            recorded_at=datetime.fromisoformat(row["recorded_at"]),
+        )
+
+    def set_task_state(
+        self, task_id: str, state: str, updated_at: datetime, pr_is_draft: bool
+    ) -> None:
+        with self._tx() as connection:
+            connection.execute(
+                "UPDATE fact_task SET state = ?, pr_is_draft = ?, updated_at = ?"
+                " WHERE task_id = ?",
+                (state, int(pr_is_draft), updated_at.isoformat(), task_id),
             )
 
     def record_snapshot(self, day: datetime, counter_name: str, value: float) -> None:
