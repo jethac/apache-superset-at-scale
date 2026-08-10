@@ -22,6 +22,7 @@ from .normalize import from_github
 from .orchestrator import Orchestrator
 from .outbox import list_outbox
 from .policy import PolicyConfig
+from .report import build_report
 from .scope import ScopeConfig
 from .simulate import render, run_simulation
 from .store import FactStore
@@ -99,6 +100,14 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill_parser.add_argument("--config", default=debt.DEFAULT_CONFIG)
 
     subparsers.add_parser("report", help="print the funnel and the Sankey edge list")
+
+    brief = subparsers.add_parser(
+        "brief", help="write the markdown status report for pasting into an issue or an email"
+    )
+    brief.add_argument(
+        "--repo", help="repository whose sessions the brief covers; defaults to the scope target"
+    )
+    brief.add_argument("--out", type=Path, help="write to FILE instead of stdout")
 
     subparsers.add_parser(
         "outbox", help="list draft pull requests waiting on a human authorship paragraph"
@@ -181,6 +190,23 @@ def main(argv: list[str] | None = None) -> int:
                 indent=2,
             )
         )
+        return 0
+
+    if args.command == "brief":
+        # The trend tables belong to their own modules, so a store written before they landed
+        # still produces a brief that says "no data" rather than failing on a missing table.
+        debt.ensure_schema(store)
+        cicost.ensure_schema(store)
+        markdown = build_report(
+            store,
+            args.repo or scope.defaults.target_repo,
+            measure_repo=settings.measure_repo,
+        )
+        if args.out:
+            Path(args.out).write_text(markdown, encoding="utf-8")
+            logging.info("wrote %s", args.out)
+        else:
+            print(markdown, end="")
         return 0
 
     devin = (
