@@ -1,0 +1,157 @@
+"""Command line entry point."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import uvicorn
+
+from .collector import Collector
+from .config import Settings
+from .devin import FakeDevinClient, HttpDevinClient
+from .flow import build_edges, funnel, reconciles
+from .github import HttpGitHubClient
+from .normalize import from_github
+from .orchestrator import Orchestrator
+from .scope import ScopeConfig
+from .simulate import render, run_simulation
+from .store import FactStore
+from .wizard import run_wizard
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="scoreboard", description="FDE deployment scoreboard")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("init", help="interactive setup wizard for GitHub and Devin credentials")
+
+    serve = subparsers.add_parser("serve", help="run the webhook receiver and report API")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+
+    simulate = subparsers.add_parser(
+        "simulate", help="run the full workflow offline, no credentials"
+    )
+    simulate.add_argument("--events", type=int, default=24)
+    simulate.add_argument("--seed", type=int, default=7)
+
+    intake = subparsers.add_parser("intake", help="poll GitHub issues and route them")
+    intake.add_argument("--repo", action="append", required=True)
+    intake.add_argument("--since-days", type=int, default=30)
+
+    collect = subparsers.add_parser("collect", help="collect PR facts for a window")
+    collect.add_argument("--repo", required=True)
+    collect.add_argument("--since-days", type=int, default=90)
+
+    subparsers.add_parser("report", help="print the funnel and the Sankey edge list")
+
+    replay = subparsers.add_parser("replay", help="route a saved webhook payload from a file")
+    replay.add_argument("--event", required=True, help="GitHub event name, e.g. issues")
+    replay.add_argument("path", type=Path)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    args = _build_parser().parse_args(argv)
+    settings = Settings.from_env()
+
+    if args.command == "init":
+        return run_wizard(settings.scope_path)
+
+    if args.command == "serve":
+        uvicorn.run("scoreboard.api:app", host=args.host, port=args.port, log_level="info")
+        return 0
+
+    if args.command == "simulate":
+        result = run_simulation(
+            settings.scope_path, settings.db_path, event_count=args.events, seed=args.seed
+        )
+        print(render(result))
+        return 0 if result["reconciles"] else 1
+
+    scope = ScopeConfig.load(settings.scope_path)
+    store = FactStore(settings.db_path)
+
+    if args.command == "report":
+        counts = funnel(store)
+        print(
+            json.dumps(
+                {
+                    "funnel": counts,
+                    "reconciles": reconciles(counts),
+                    "sankey_edges": [edge.__dict__ for edge in build_edges(store)],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    devin = (
+        HttpDevinClient(
+            settings.devin_api_key, settings.devin_base_url, org_id=settings.devin_org_id
+        )
+        if settings.devin_api_key
+        else FakeDevinClient()
+    )
+    if not settings.devin_api_key:
+        logging.warning("DEVIN_API_KEY not set: using the offline fake client")
+    orchestrator = Orchestrator(
+        scope=scope,
+        store=store,
+        devin=devin,
+        dry_run=settings.dry_run,
+        allow_upstream_write=settings.allow_upstream_write,
+    )
+
+    if args.command == "replay":
+        payload = json.loads(Path(args.path).read_text(encoding="utf-8"))
+        task = orchestrator.handle(from_github("replay", args.event, payload))
+        print(
+            json.dumps(
+                {
+                    "task_id": task.task_id,
+                    "state": task.state.value,
+                    "stream": task.decision.stream,
+                    "reason": task.decision.reason,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    github = HttpGitHubClient(settings.github_token, settings.github_api_url)
+
+    if args.command == "intake":
+        since = datetime.now(UTC) - timedelta(days=args.since_days)
+        for repo in args.repo:
+            for event in github.list_issues(repo, since):
+                task = orchestrator.handle(event)
+                logging.info(
+                    "%s#%s -> %s (%s)",
+                    repo,
+                    event.number,
+                    task.state.value,
+                    task.decision.reason,
+                )
+        return 0
+
+    if args.command == "collect":
+        now = datetime.now(UTC)
+        count = Collector(github=github, store=store).collect_pull_requests(
+            args.repo, now - timedelta(days=args.since_days), now
+        )
+        logging.info("collected %d pull requests from %s", count, args.repo)
+        return 0
+
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

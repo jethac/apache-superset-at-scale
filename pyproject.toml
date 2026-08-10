@@ -1,0 +1,56 @@
+[project]
+name = "scoreboard"
+version = "0.1.0"
+description = "Event-driven Devin automation and deployment scoreboard for the Superset fork"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.115.6",
+    "httpx==0.28.1",
+    "pydantic==2.10.4",
+    "pyyaml==6.0.2",
+    "uvicorn==0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy==1.14.1",
+    "pytest==8.3.4",
+    "ruff==0.8.6",
+    "types-pyyaml==6.0.12.20241230",
+]
+
+[project.scripts]
+scoreboard = "scoreboard.cli:main"
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scoreboard"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "N"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+mypy_path = "src"
+packages = ["scoreboard"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

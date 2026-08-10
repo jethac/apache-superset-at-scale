@@ -1,0 +1,82 @@
+# Scope rules for the deployment.
+#
+# Ordered; first match wins. An event matching no rule is FILTERED, so widening scope is always
+# an explicit act rather than an accident.
+#
+# `target_repo` is where work lands. Upstream (apache/superset) is an intake source only: we read
+# its issues, and the resulting PR is opened on the fork. Nothing here can open a PR upstream —
+# that requires flipping `allow_upstream_write` in configuration, which is off by default.
+
+version: 1
+
+defaults:
+  target_repo: jethac/superset
+  max_acu_limit: 10
+  tags:
+    - fde:initiative=superset-scoreboard
+
+rules:
+  - id: security-critical
+    description: >-
+      Code scanning and Dependabot alerts at high severity, on the fork. Highest priority and
+      allowed a larger budget because a security fix that runs out of ACUs mid-way is worse than
+      one that never started.
+    when:
+      repo: [jethac/superset]
+      event_type: [code_scanning_alert, dependabot_alert]
+      severity_min: high
+    then:
+      stream: security
+      max_acu_limit: 20
+
+  - id: ci-failure-on-fork
+    description: Failing CI on the fork's default branch — the deployment's fastest feedback loop.
+    when:
+      repo: [jethac/superset]
+      event_type: [check_run]
+    then:
+      stream: bugfix
+
+  - id: fork-bug-issue
+    description: Bug-labelled issues filed directly on the fork.
+    when:
+      repo: [jethac/superset]
+      event_type: [issue]
+      labels_any: ["bug", "#bug"]
+      exclude_bots: true
+    then:
+      stream: bugfix
+
+  - id: upstream-well-specified-bug
+    description: >-
+      Upstream bugs that have been open long enough to be triaged by maintainers and are not
+      already claimed. The age floor is the cheapest available proxy for "someone else is not
+      already fixing this", and it keeps the deployment from racing human contributors on fresh
+      issues — the fastest way to make an agent deployment unwelcome in someone else's repo.
+    when:
+      repo: [apache/superset]
+      event_type: [issue]
+      labels_any: ["#bug"]
+      labels_none: ["#WIP", "help wanted", "duplicate", "wontfix"]
+      age_days_min: 14
+      exclude_bots: true
+    then:
+      stream: bugfix
+      target_repo: jethac/superset
+
+  - id: upstream-viz-plugin-work
+    description: >-
+      Upstream feature work scoped to the chart plugins, which is the area this deployment has
+      demonstrated competence in. Narrow by construction: a title regex is a blunt instrument, but
+      an explicit and auditable one.
+    when:
+      repo: [apache/superset]
+      event_type: [issue]
+      title_regex: "(sankey|echarts|chart plugin|viz plugin)"
+      labels_none: ["#WIP", "wontfix"]
+      age_days_min: 7
+      exclude_bots: true
+    then:
+      stream: greenfield
+      target_repo: jethac/superset
+      max_acu_limit: 15
