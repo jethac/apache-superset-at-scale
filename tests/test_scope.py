@@ -16,8 +16,30 @@ def test_fork_bug_issue_is_admitted(scope: ScopeConfig) -> None:
     assert decision.target_repo == "jethac/superset"
 
 
+def test_an_issue_on_the_fork_is_admitted_as_backlog_whatever_its_labels(
+    scope: ScopeConfig,
+) -> None:
+    """The fork is the deployment's own backlog: an issue filed there was filed to be worked."""
+    decision = scope.route(make_event(labels=[], title="migrate the last 2 Cypress specs"))
+    assert decision.admitted
+    assert decision.rule_id == "fork-backlog"
+
+
+def test_a_bot_filed_issue_on_the_fork_is_still_backlog(scope: ScopeConfig) -> None:
+    """Issues the automation files for itself are the point, not noise to be excluded."""
+    decision = scope.route(make_event(labels=["bug"], author_is_bot=True))
+    assert decision.admitted
+    assert decision.rule_id == "fork-backlog"
+
+
+def test_a_dependency_bump_issue_on_the_fork_stays_out(scope: ScopeConfig) -> None:
+    assert not scope.route(make_event(labels=["dependencies"])).admitted
+
+
 def test_unmatched_event_is_filtered_not_admitted(scope: ScopeConfig) -> None:
-    decision = scope.route(make_event(labels=["question"], title="How do I deploy?"))
+    decision = scope.route(
+        make_event(repo="apache/superset", labels=["question"], title="How do I deploy?")
+    )
     assert not decision.admitted
     assert decision.reason == "no matching rule"
     assert decision.stream is None
@@ -40,8 +62,10 @@ def test_excluded_label_blocks_an_otherwise_matching_upstream_issue(scope: Scope
     assert not decision.admitted
 
 
-def test_bot_authored_issue_is_filtered(scope: ScopeConfig) -> None:
-    decision = scope.route(make_event(labels=["bug"], author_is_bot=True))
+def test_bot_authored_upstream_issue_is_filtered(scope: ScopeConfig) -> None:
+    decision = scope.route(
+        make_event(repo="apache/superset", labels=["#bug"], age_days=30, author_is_bot=True)
+    )
     assert not decision.admitted
 
 

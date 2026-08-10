@@ -184,6 +184,14 @@ class FactStore:
                                        policy_profile, acus_consumed, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
+                    -- The verdict is rewritten because a task is only routed a second time
+                    -- while it has no session: the rules may have widened since it was first
+                    -- seen, and the stored reason should say why it stands where it does now.
+                    target_repo=excluded.target_repo,
+                    stream=excluded.stream,
+                    rule_id=excluded.rule_id,
+                    admitted=excluded.admitted,
+                    reason=excluded.reason,
                     state=excluded.state,
                     session_id=COALESCE(excluded.session_id, fact_task.session_id),
                     pr_url=COALESCE(excluded.pr_url, fact_task.pr_url),
@@ -224,6 +232,36 @@ class FactStore:
             connection.execute(
                 "UPDATE fact_task SET dedupe_hits = dedupe_hits + 1 WHERE task_id = ?", (task_id,)
             )
+
+    def task_has_started(self, task_id: str) -> bool:
+        """Whether a session was ever created for this task.
+
+        This is the line between a re-sighting that is genuinely a duplicate and one that is a
+        second chance. Work that never started has cost nothing and holds no result, so the only
+        thing lost by routing it again is the stale verdict.
+        """
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM fact_task WHERE task_id = ? AND session_id IS NOT NULL",
+                (task_id,),
+            ).fetchone()
+        return row is not None
+
+    def known_session_ids(self) -> set[str]:
+        """Every session the store has a task for, whoever started it."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT session_id FROM fact_task WHERE session_id IS NOT NULL"
+            ).fetchall()
+        return {str(row["session_id"]) for row in rows}
+
+    def count_sessions_in_flight(self) -> int:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT COUNT(*) AS running FROM fact_task WHERE state = ?",
+                (TaskState.SESSION_STARTED.value,),
+            ).fetchone()
+        return int(row["running"])
 
     def task_exists(self, task_id: str) -> bool:
         with self._lock:

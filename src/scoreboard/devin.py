@@ -14,6 +14,7 @@ from __future__ import annotations
 import itertools
 import random
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol
 
 import httpx
@@ -53,6 +54,22 @@ class SessionState:
 
 
 @dataclass(frozen=True)
+class SessionSummary:
+    """A session as the Devin API lists it, including ones this deployment never started.
+
+    A fleet view built only from what the orchestrator dispatched under-reports the fleet: a
+    human, or another Devin, can start sessions against the same initiative, and those spend the
+    same ACUs and open the same pull requests.
+    """
+
+    session_id: str
+    title: str
+    tags: list[str]
+    status: str
+    created_at: datetime | None
+
+
+@dataclass(frozen=True)
 class Repository:
     """A repository Devin itself can reach, as reported by the Devin API.
 
@@ -70,6 +87,8 @@ class DevinClient(Protocol):
     def create_session(self, request: SessionRequest) -> SessionState: ...
 
     def get_session(self, session_id: str) -> SessionState: ...
+
+    def list_sessions(self, limit: int = 100) -> list[SessionSummary]: ...
 
     def list_repositories(self) -> list[Repository]: ...
 
@@ -89,6 +108,18 @@ def _state_from_payload(payload: dict[str, Any]) -> SessionState:
         acus_consumed=payload.get("acus_consumed"),
         structured_output=payload.get("structured_output"),
         url=payload.get("url"),
+    )
+
+
+def _summary_from_payload(payload: dict[str, Any]) -> SessionSummary:
+    stamp = payload.get("created_at")
+    created_at = datetime.fromisoformat(str(stamp).replace("Z", "+00:00")) if stamp else None
+    return SessionSummary(
+        session_id=str(payload.get("session_id") or payload.get("id") or ""),
+        title=str(payload.get("title") or ""),
+        tags=[str(tag) for tag in payload.get("tags") or []],
+        status=str(payload.get("status_enum") or payload.get("status") or "unknown"),
+        created_at=created_at,
     )
 
 
@@ -133,6 +164,12 @@ class HttpDevinClient:
         response = self._client.get(f"/v1/sessions/{session_id}")
         response.raise_for_status()
         return _state_from_payload(response.json())
+
+    def list_sessions(self, limit: int = 100) -> list[SessionSummary]:
+        response = self._client.get("/v1/sessions", params={"limit": limit})
+        response.raise_for_status()
+        payload = response.json()
+        return [_summary_from_payload(item) for item in payload.get("sessions") or []]
 
     def list_repositories(self) -> list[Repository]:
         """Repositories the Devin organisation can reach. Requires an organisation ID."""
@@ -185,6 +222,7 @@ class FakeDevinClient:
         ("failed", 0.08),
     )
     sessions: dict[str, SessionState] = field(default_factory=dict)
+    foreign_sessions: list[SessionSummary] = field(default_factory=list)
     _counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
     _random: random.Random = field(init=False)
 
@@ -243,6 +281,20 @@ class FakeDevinClient:
 
     def get_session(self, session_id: str) -> SessionState:
         return self.sessions[session_id]
+
+    def list_sessions(self, limit: int = 100) -> list[SessionSummary]:
+        """Sessions this client created, plus any planted to stand in for another Devin's."""
+        listed = [
+            SessionSummary(
+                session_id=state.session_id,
+                title=state.session_id,
+                tags=[],
+                status=state.status,
+                created_at=None,
+            )
+            for state in self.sessions.values()
+        ]
+        return (listed + self.foreign_sessions)[:limit]
 
     def list_repositories(self) -> list[Repository]:
         return [

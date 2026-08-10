@@ -11,9 +11,9 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from .devin import DevinClient, SessionRequest
+from .devin import DevinClient, SessionRequest, SessionSummary
 from .github import assert_writable
-from .models import Decision, Event, Task, TaskState, make_task_id
+from .models import Decision, Event, EventType, Task, TaskState, make_task_id
 from .policy import PolicyConfig, Profile, Submission, evaluate, prompt_section
 from .scope import ScopeConfig
 from .store import FactStore
@@ -66,14 +66,19 @@ class Orchestrator:
 
         if self.store.task_exists(task_id):
             self.store.record_duplicate_sighting(task_id)
-            return Task(
-                task_id=task_id,
-                event=event,
-                decision=Decision(admitted=False, reason="duplicate of an existing task"),
-                state=TaskState.DEDUPED,
-                created_at=moment,
-                updated_at=moment,
-            )
+            # Only work that already has a session is a settled duplicate. Anything else is
+            # re-routed against the current rules from the event just read, so a rule widened
+            # after an issue was first seen picks that issue up, and work admitted while the
+            # fleet was full is dispatched once there is room.
+            if self.store.task_has_started(task_id):
+                return Task(
+                    task_id=task_id,
+                    event=event,
+                    decision=Decision(admitted=False, reason="duplicate of an existing task"),
+                    state=TaskState.DEDUPED,
+                    created_at=moment,
+                    updated_at=moment,
+                )
 
         decision = self.scope.route(event, moment)
         task = Task(
@@ -102,6 +107,13 @@ class Orchestrator:
             self.store.upsert_task(task)
             return task
 
+        if not self._has_dispatch_capacity():
+            task.decision = decision.model_copy(
+                update={"reason": f"{decision.reason} (queued: the fleet is at capacity)"}
+            )
+            self.store.upsert_task(task)
+            return task
+
         state = self.devin.create_session(
             SessionRequest(
                 prompt=build_prompt(event, decision, profile),
@@ -121,6 +133,45 @@ class Orchestrator:
 
         self.store.upsert_task(task)
         return task
+
+    def _has_dispatch_capacity(self) -> bool:
+        """Whether another session may start, given how many are already running.
+
+        Admitting work and paying for it are separate acts. Without this, a backlog filed in one
+        afternoon becomes that many concurrent sessions and that many ACUs in the same minute,
+        which is neither reviewable by a human nor recoverable if the routing was wrong. Work over
+        the limit stays admitted and waits; intake's next pass dispatches it.
+        """
+        limit = self.scope.defaults.max_concurrent_sessions
+        if limit is None:
+            return True
+        return self.store.count_sessions_in_flight() < limit
+
+    def adopt(self, now: datetime | None = None) -> list[str]:
+        """Record sessions this deployment did not start but is accountable for.
+
+        The fleet is not only what this process dispatched: a human, or another Devin working the
+        same backlog, starts sessions that spend the same ACUs against the same repository. A
+        roster that omits them reports a smaller fleet than the Devin app shows, and the first
+        person to notice is the reviewer. Ownership is claimed by tag, so adoption stays an
+        explicit configuration decision rather than a guess made from titles.
+        """
+        wanted = set(self.scope.defaults.adopt_session_tags)
+        if not wanted:
+            return []
+        moment = now or datetime.now(UTC)
+        known = self.store.known_session_ids()
+        adopted: list[str] = []
+
+        for summary in self.devin.list_sessions():
+            if summary.session_id in known or not wanted.intersection(summary.tags):
+                continue
+            task = _adopted_task(summary, self.scope.defaults.target_repo, moment)
+            self.store.upsert_task(task)
+            logger.info("adopted session %s (%s)", summary.session_id, summary.title)
+            adopted.append(summary.session_id)
+
+        return adopted
 
     def sync(self, now: datetime | None = None) -> list[tuple[str, TaskState]]:
         """Poll every started session and move the ones that have reached an outcome.
@@ -196,6 +247,48 @@ class Orchestrator:
             task.pr_is_draft = profile.contribution.open_as_draft
             return TaskState.DRAFT_AWAITING_AUTHORSHIP
         return task.state
+
+
+def _tag_value(tags: list[str], prefix: str) -> str | None:
+    for tag in tags:
+        if tag.startswith(prefix):
+            return tag[len(prefix) :]
+    return None
+
+
+def _adopted_task(summary: SessionSummary, target_repo: str, moment: datetime) -> Task:
+    """A task standing for a session started elsewhere, described by what the session carries.
+
+    There is no triggering event to point at, so the session itself is the event: its own tags
+    say which repository and trigger it came from where the dispatcher set them, and the reason
+    records that the row was adopted rather than routed, so the funnel cannot pass it off as
+    admitted work.
+    """
+    repo = _tag_value(summary.tags, "fde:source-repo=") or target_repo
+    trigger = _tag_value(summary.tags, "fde:trigger=")
+    event = Event(
+        event_id=summary.session_id,
+        event_type=EventType(trigger) if trigger in set(EventType) else EventType.SCHEDULE,
+        repo=repo,
+        title=summary.title,
+        created_at=summary.created_at or moment,
+        url=f"https://app.devin.ai/sessions/{summary.session_id}",
+    )
+    return Task(
+        task_id=make_task_id(event),
+        event=event,
+        decision=Decision(
+            admitted=True,
+            reason="adopted: session started outside this deployment",
+            stream=_tag_value(summary.tags, "fde:stream="),
+            target_repo=target_repo,
+            tags=summary.tags,
+        ),
+        state=TaskState.SESSION_STARTED,
+        session_id=summary.session_id,
+        created_at=event.created_at,
+        updated_at=moment,
+    )
 
 
 def _submission_from(pr_url: str, structured_output: dict[str, object] | None) -> Submission:
