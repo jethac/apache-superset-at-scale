@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from fastapi import APIRouter, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .flow import build_edges, funnel
 from .outbox import list_outbox
@@ -668,6 +668,17 @@ def dashboard_payload(
 def build_router(store: FactStore, repo: str, measure_repo: str | None = None) -> APIRouter:
     """Router for the operator page and its data document, for `app.include_router`."""
     router = APIRouter()
+
+    @router.get("/", include_in_schema=False)
+    def read_root() -> RedirectResponse:
+        """The bare hostname is the link that gets pasted, so it has to land on the page.
+
+        A redirect rather than a second copy of the route: the page keeps one canonical address,
+        so a link to a number and a link to the site cannot drift apart. 307 rather than 301
+        because a permanent redirect is cached by the browser and would outlive any later decision
+        to serve something else at the root.
+        """
+        return RedirectResponse("/dashboard", status_code=307)
 
     @router.get("/dashboard", response_class=HTMLResponse)
     def read_dashboard() -> HTMLResponse:

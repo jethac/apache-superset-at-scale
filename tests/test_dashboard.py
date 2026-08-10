@@ -430,3 +430,20 @@ def test_debt_and_ci_are_read_from_the_measured_repo_not_the_write_target(
     assert payload["repo"] == REPO
     assert payload["measure_repo"] == "apache/superset"
     assert set(seen) == {"apache/superset"}
+
+
+def test_the_bare_hostname_lands_on_the_page(store: FactStore) -> None:
+    """The link that gets pasted is the hostname, not the hostname plus a path.
+
+    Checked without following the redirect so the target is asserted, not merely the eventual
+    200 — a redirect to the wrong place still ends in a page.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(build_router(store, "jethac/superset"))
+    response = TestClient(app).get("/", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/dashboard"
