@@ -222,7 +222,10 @@ def _median(values: list[float]) -> float | None:
 
 
 def throughput_payload(
-    store: FactStore, repo: str, cost_series: CostSeriesFn | None = None
+    store: FactStore,
+    repo: str,
+    cost_series: CostSeriesFn | None = None,
+    measure_repo: str | None = None,
 ) -> dict[str, object]:
     """Is it working, and at what rate — answered from the same facts the flow is drawn from.
 
@@ -251,7 +254,7 @@ def throughput_payload(
         / 3600
         for row in delivered
     ]
-    cost_points = ci_cost_payload(store, repo, series=cost_series)
+    cost_points = ci_cost_payload(store, measure_repo or repo, series=cost_series)
     minutes_per_pr = cost_points[-1]["median_minutes_per_pr"] if cost_points else None
     prs = len([row for row in rows if row["pr_url"]])
     median_hours = _median(hours)
@@ -290,6 +293,91 @@ def _daily_throughput(rows: Sequence[sqlite3.Row]) -> list[dict[str, object]]:
         {"day": day, "started": started.get(day, 0), "delivered": delivered.get(day, 0)}
         for day in sorted(set(started) | set(delivered))
     ]
+
+
+OUTCOME_NODES = {
+    "session_started": ("In flight", "running"),
+    "work_delivered": ("Pull request delivered", "delivered"),
+    "draft_awaiting_authorship": ("Draft awaiting authorship", "delivered"),
+    "escalated": ("Escalated to human", "escalated"),
+    "errored": ("Errored", "errored"),
+}
+
+
+def dispatch_graph_payload(store: FactStore) -> dict[str, object]:
+    """Dispatches and their outcomes as a directed graph, one edge per Devin session.
+
+    A bar chart of sessions per day answers "how many" and hides the thing worth seeing, which is
+    that one trigger fans out to many Devins and those Devins do not all end the same way. As a
+    graph, a fan-out is literally a branch: the burst node a reviewer can count, an edge per
+    session carrying its own identity, and a terminal node naming what became of it. Nothing is
+    aggregated away, so a session that errored cannot hide inside a day's total.
+    """
+    rows = store.query(
+        "SELECT t.session_id, t.repo, e.number, t.stream, t.state, t.pr_url,"
+        " t.created_at, t.updated_at"
+        " FROM fact_task t LEFT JOIN fact_event e ON e.event_id = t.event_id"
+        " WHERE t.session_id IS NOT NULL ORDER BY t.created_at"
+    )
+    bursts: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        bursts.setdefault(str(row["created_at"])[:10], []).append(row)
+
+    nodes: list[dict[str, object]] = []
+    edges: list[dict[str, object]] = []
+    for day, batch in sorted(bursts.items()):
+        burst_id = f"burst:{day}"
+        nodes.append(
+            {
+                "id": burst_id,
+                "kind": "dispatch",
+                "label": day,
+                "detail": f"{len(batch)} session{'s' if len(batch) != 1 else ''} dispatched",
+                "count": len(batch),
+                "at": day,
+            }
+        )
+        for row in batch:
+            session_id = str(row["session_id"])
+            label, outcome = OUTCOME_NODES.get(str(row["state"]), ("Unknown", "running"))
+            outcome_id = f"outcome:{day}:{outcome}"
+            nodes.append(
+                {
+                    "id": f"session:{session_id}",
+                    "kind": "session",
+                    "label": f"{row['repo']}#{row['number']}"
+                    if row["number"]
+                    else str(row["repo"]),
+                    "detail": str(row["stream"] or "unrouted"),
+                    "session_url": SESSION_URL + session_id.removeprefix("devin-"),
+                    "pr_url": row["pr_url"],
+                    "outcome": outcome,
+                    "at": str(row["created_at"]),
+                }
+            )
+            if not any(node["id"] == outcome_id for node in nodes):
+                nodes.append(
+                    {
+                        "id": outcome_id,
+                        "kind": "outcome",
+                        "label": label,
+                        "outcome": outcome,
+                        "count": 0,
+                        "at": str(row["updated_at"]),
+                    }
+                )
+            for node in nodes:
+                if node["id"] == outcome_id:
+                    node["count"] = int(cast(int, node["count"])) + 1
+            edges.append({"source": burst_id, "target": f"session:{session_id}"})
+            edges.append(
+                {
+                    "source": f"session:{session_id}",
+                    "target": outcome_id,
+                    "outcome": outcome,
+                }
+            )
+    return {"nodes": nodes, "edges": edges}
 
 
 def _verdict(first: float, last: float, want_down: bool) -> str:
@@ -388,6 +476,7 @@ def thesis_payload(
     throughput: dict[str, object],
     debt_series: DebtSeriesFn | None = None,
     cost_series: CostSeriesFn | None = None,
+    measure_repo: str | None = None,
 ) -> list[dict[str, object]]:
     """The three claims the deployment is making, each with the evidence that settles it.
 
@@ -396,16 +485,17 @@ def thesis_payload(
     claim with nothing behind it looks unproven rather than achieved.
     """
     daily = cast(Sequence[dict[str, object]], throughput["daily"])
+    measured = measure_repo or repo
     return [
         {
             "goal": "Technical debt falls",
             "measure": "oxlint violations under the project's configured rule set",
-            **_debt_claim(debt_payload(store, repo, series=debt_series)),
+            **_debt_claim(debt_payload(store, measured, series=debt_series)),
         },
         {
             "goal": "CI compute per pull request falls",
             "measure": "median billed job-minutes per pull request",
-            **_cost_claim(ci_cost_payload(store, repo, series=cost_series)),
+            **_cost_claim(ci_cost_payload(store, measured, series=cost_series)),
         },
         {
             "goal": "More issues ship",
@@ -450,26 +540,41 @@ def dashboard_payload(
     repo: str,
     debt_series: DebtSeriesFn | None = None,
     cost_series: CostSeriesFn | None = None,
+    measure_repo: str | None = None,
 ) -> dict[str, object]:
-    """One document per page load: the page makes exactly one request and draws from it."""
-    throughput = throughput_payload(store, repo, cost_series=cost_series)
+    """One document per page load: the page makes exactly one request and draws from it.
+
+    Two repositories, deliberately. Sessions and pull requests are the fork's, because that is
+    where the fleet is permitted to write; debt and CI minutes are the upstream project's, because
+    that is the codebase whose health the thesis is about. Measuring the fork's own CI would
+    describe this deployment rather than the problem it exists to shrink.
+    """
+    measured = measure_repo or repo
+    throughput = throughput_payload(store, repo, cost_series=cost_series, measure_repo=measured)
     return {
         "repo": repo,
+        "measure_repo": measured,
         "generated_at": datetime.now(UTC).isoformat(),
         "thesis": thesis_payload(
-            store, repo, throughput, debt_series=debt_series, cost_series=cost_series
+            store,
+            repo,
+            throughput,
+            debt_series=debt_series,
+            cost_series=cost_series,
+            measure_repo=measured,
         ),
-        "debt": debt_payload(store, repo, series=debt_series),
-        "ci_cost": ci_cost_payload(store, repo, series=cost_series),
+        "debt": debt_payload(store, measured, series=debt_series),
+        "ci_cost": ci_cost_payload(store, measured, series=cost_series),
         "throughput": throughput,
         "flow": flow_payload(store),
         "fleet": fleet_payload(store),
+        "dispatch_graph": dispatch_graph_payload(store),
         "funnel": funnel_payload(store),
         "outbox": outbox_payload(store),
     }
 
 
-def build_router(store: FactStore, repo: str) -> APIRouter:
+def build_router(store: FactStore, repo: str, measure_repo: str | None = None) -> APIRouter:
     """Router for the operator page and its data document, for `app.include_router`."""
     router = APIRouter()
 
@@ -489,6 +594,6 @@ def build_router(store: FactStore, repo: str) -> APIRouter:
 
     @router.get("/dashboard/data")
     def read_dashboard_data() -> dict[str, object]:
-        return dashboard_payload(store, repo)
+        return dashboard_payload(store, repo, measure_repo=measure_repo)
 
     return router

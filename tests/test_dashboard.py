@@ -340,3 +340,46 @@ def test_page_loads_no_third_party_script_or_stylesheet() -> None:
     assert [source for source in sources if source.startswith(("http://", "https://", "//"))] == []
     assert "@import" not in html
     assert "cdn" not in html.lower()
+
+
+def test_dispatch_graph_branches_one_edge_per_session(store: FactStore, scope: ScopeConfig) -> None:
+    """Fan-out has to survive as structure: a session cannot be aggregated into a day's total."""
+    seed(store, scope)
+
+    graph = cast(dict[str, list[dict[str, object]]], dashboard.dispatch_graph_payload(store))
+    sessions = [node for node in graph["nodes"] if node["kind"] == "session"]
+    bursts = [node for node in graph["nodes"] if node["kind"] == "dispatch"]
+    outcomes = [node for node in graph["nodes"] if node["kind"] == "outcome"]
+
+    assert sessions and bursts and outcomes
+    assert len({node["id"] for node in graph["nodes"]}) == len(graph["nodes"])
+    assert len(graph["edges"]) == 2 * len(sessions)
+    assert sum(cast(int, node["count"]) for node in bursts) == len(sessions)
+    assert sum(cast(int, node["count"]) for node in outcomes) == len(sessions)
+    ids = {node["id"] for node in graph["nodes"]}
+    assert all({edge["source"], edge["target"]} <= ids for edge in graph["edges"])
+    for node in sessions:
+        assert cast(str, node["session_url"]).startswith("https://app.devin.ai/sessions/")
+
+
+def test_debt_and_ci_are_read_from_the_measured_repo_not_the_write_target(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """Sessions land on the fork; debt and CI minutes describe the project the fork came from."""
+    seen: list[str] = []
+
+    def recording_debt_series(store: FactStore, repo: str) -> list[FakeDebtPoint]:
+        seen.append(repo)
+        return DEBT_POINTS
+
+    payload = dashboard_payload(
+        store,
+        REPO,
+        debt_series=recording_debt_series,
+        cost_series=fake_cost_series,
+        measure_repo="apache/superset",
+    )
+
+    assert payload["repo"] == REPO
+    assert payload["measure_repo"] == "apache/superset"
+    assert set(seen) == {"apache/superset"}

@@ -64,7 +64,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_upstream_write=config.allow_upstream_write,
     )
 
-    app.include_router(build_router(store, scope.defaults.target_repo))
+    app.include_router(
+        build_router(store, scope.defaults.target_repo, measure_repo=config.measure_repo)
+    )
 
     @app.get("/health")
     def health() -> dict[str, Any]:
