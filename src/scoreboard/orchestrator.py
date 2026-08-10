@@ -224,12 +224,16 @@ def _state_for(
 
     `no_action_needed` counts as delivered work. A correctly reasoned decision not to change the
     code is a real outcome, and counting only pull requests would reward opening unnecessary ones.
+
+    Delivery is read before `waiting_for_user`, which a session enters as soon as it finishes and
+    reports back. Taking that status first would file every completed session as an escalation and
+    the delivery rate would read zero with the pull requests sitting on GitHub.
     """
     outcome = (structured_output or {}).get("outcome")
     if outcome == "failed" or status_detail == "errored":
         return TaskState.ERRORED
-    if outcome == "escalated" or status_detail == "waiting_for_user":
-        return TaskState.ESCALATED
     if pr_url or outcome in {"pr_opened", "no_action_needed"}:
         return TaskState.WORK_DELIVERED
+    if outcome == "escalated" or status_detail == "waiting_for_user":
+        return TaskState.ESCALATED
     return TaskState.SESSION_STARTED

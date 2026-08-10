@@ -338,13 +338,17 @@ class FactStore:
 
         A session that is still working is not a failure and not a delivery; it is a row the
         poller has to come back to, which is why the funnel keeps `in_flight` as its own bucket.
+
+        A `deduped` row that owns a session is picked up too. Deduping is a decision made before a
+        session exists, so the combination can only be a row an earlier duplicate sighting wrote
+        over; leaving it out would strand real, running work outside the poller for good.
         """
         with self._lock:
             return list(
                 self._connection.execute(
                     "SELECT task_id, session_id, target_repo, policy_profile FROM fact_task"
-                    " WHERE session_id IS NOT NULL AND state = ?",
-                    (TaskState.SESSION_STARTED.value,),
+                    " WHERE session_id IS NOT NULL AND state IN (?, ?)",
+                    (TaskState.SESSION_STARTED.value, TaskState.DEDUPED.value),
                 ).fetchall()
             )
 
