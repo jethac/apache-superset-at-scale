@@ -17,12 +17,15 @@ attributed by commit. If a beat runs long, cut from Beat 7, not from Beat 5.
 
 **Screen.** Superset's own tech-debt dashboard, the lint panel, showing 92
 violations. Then a terminal beside it running `scoreboard measure --checkout
-../superset`, which runs the project's configured rules and records 1,470.
+../superset`, which runs the project's configured rules and records thousands.
+
+Read the second number off the terminal rather than from this script — it is a
+measurement of whatever commit you run against, and it moves.
 
 **Spoken.**
 > This is Superset's tech-debt dashboard. It says there are 92 lint violations.
-> Here are the project's own configured rules, run against the same code. One
-> thousand four hundred and seventy. The uploader runs oxlint without pointing it
+> Here are the project's own configured rules, run against the same code. Four
+> thousand two hundred. The uploader runs oxlint without pointing it
 > at the config file, so the dashboard has been reporting the default rule set
 > for months. While that was happening, exhaustive-deps went from 238 violations
 > to 381, and nobody saw it. That is the problem: work gets delegated against
@@ -101,8 +104,8 @@ contribution.
 > only the rules every run measured. That one you can read end to end. It sits
 > lower because it counts fewer rules, not because there is less debt.
 >
-> The cost line sums billed job-minutes per pull request: about 170 minutes a
-> change, twenty of it the last two Cypress specs. The Actions API only names the
+> The cost line is the median billed job-minutes a pull request has to buy, and
+> the breakdown says which workflows are buying it. The Actions API only names the
 > pull request when the branch is in the repository, and nearly every Superset
 > contribution comes from a fork, so we ask the head commit instead. Without that
 > this median would describe committers, not contributors.

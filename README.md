@@ -60,11 +60,12 @@ computed against. `dashboard_payload` takes both and keeps them apart —
 the measurement target — and the document it returns names each of them.
 
 The split is the point, not a convenience. The problem being measured is
-Superset's — 1,470 lint violations, roughly 170 CI minutes for every change —
-and it exists whether or not this deployment ever runs. Measuring the fork's own
-CI instead would describe the deployment's activity rather than the debt it
-exists to shrink, and would make the "before" column a property of when we
-started. So upstream is read in both directions and written in neither:
+Superset's — thousands of lint violations under its own configured rules, and
+tens of billed CI minutes for every change — and it exists whether or not this
+deployment ever runs. Measuring the fork's own CI instead would describe the
+deployment's activity rather than the debt it exists to shrink, and would make
+the "before" column a property of when we started. So upstream is read in both
+directions and written in neither:
 `assert_writable` in [`github.py`](src/scoreboard/github.py) raises on any
 upstream target unless `ALLOW_UPSTREAM_WRITE` is set, which it is not by
 default, and the GitHub token you are told to create below is not granted
@@ -110,7 +111,8 @@ funnel arithmetic against generated events and a fake Devin client — no
 credentials, no network. It exists so CI can assert the invariant
 
 ```
-filtered + deduped + work_delivered + escalated + errored + in_flight == triggered
+filtered + deduped + queued + in_flight
+  + work_delivered + awaiting_authorship + escalated + errored == triggered
 ```
 
 on every commit, and the command exits non-zero if it ever fails. It proves the
@@ -161,6 +163,7 @@ image layer.
 | `WEBHOOK_SECRET` | HMAC secret for GitHub deliveries. Unset means *every* webhook is rejected. |
 | `DRY_RUN` | Default `true`: route and record, create no sessions. |
 | `ALLOW_UPSTREAM_WRITE` | Default `false`: refuse to target an upstream repository. |
+| `DB_PATH` | Default `data/facts.db`: the SQLite fact store every command reads and writes. |
 
 Create the Devin key from a dedicated service user with a minimal role
 (<https://docs.devin.ai/api-reference/authentication>) rather than from your own
@@ -206,10 +209,35 @@ follow the scheme and contrast dial rather than a hard-coded palette. Nothing is
 load — a CDN reference would be unreviewed code arriving from outside the image, and the container
 runs without egress anyway. `src/scoreboard/static/VENDOR.md` records the commit it was built from.
 
-While `DRY_RUN=true` the service routes, deduplicates and records every event
-but starts no sessions — which is exactly what you want for the first day
-against a live repository, because you can inspect what *would* have been
-picked up before anything acts.
+### Dry run is the default, and it is visible rather than silent
+
+`DRY_RUN=true` is the shipped default, and it is the single switch between
+observing a repository and spending money on it. Everything upstream of dispatch
+still happens: events are normalised, scope rules are evaluated, work is
+deduplicated, verdicts and reasons are written to the fact store, and `sync`
+still polls and adopts the sessions that already exist. What does not happen is
+`POST /v1/sessions`.
+
+That matters for reading the page, because a deployment in dry run does not look
+broken — it looks like a fleet that has stopped growing. Three places say which
+mode you are in:
+
+| Where | Dry run | Live |
+| --- | --- | --- |
+| Intake log | `-> triggered (matched rule fork-backlog (dry run: no session created))` | `-> session_started (matched rule …)` |
+| Funnel | admitted work accumulates in `queued`, and `in_flight` does not rise | `queued` drains into `in_flight` as capacity frees |
+| Fleet tab | roster grows only by adoption of externally started sessions | rows appear with session ids this deployment created |
+
+So an admitted issue sitting in `queued` means one of two different things —
+the concurrency cap is full, or dispatch is switched off entirely — and the log
+line is what distinguishes them. Flip it deliberately:
+
+```bash
+sed -i 's/^DRY_RUN=true/DRY_RUN=false/' .env   # then restart serve and poll
+```
+
+Both the `serve` and `poller` processes read `.env` at startup, so an edit takes
+effect on restart rather than on the next poll.
 
 ### Without webhooks
 
@@ -398,11 +426,42 @@ that comes out is a median over a sample of the window, not a census of it.
 Raise the cap when you want a tighter estimate and are willing to pay the API
 calls for it.
 
+### Reading the funnel
+
+Every task sits in exactly one of these at any moment, and the eight terminal
+buckets sum to `triggered` — `GET /funnel` returns `reconciles: true/false` for
+that identity and the CLI exits non-zero when it is false, so a page that adds
+up is a checked property rather than a hope.
+
+| Stage | What it means |
+| --- | --- |
+| `triggered` | Events seen. Every sighting of an issue counts, so this is much larger than the number of issues. |
+| `filtered` | No scope rule matched. Re-evaluated on every later sighting, so widening a rule rescues these. |
+| `deduped` | Already tracked under the same natural key. Not a duplicate issue — a duplicate *sighting*. |
+| `admitted` | Matched a rule. Not itself terminal: admitted work is either queued or in flight. |
+| `queued` | Admitted, no session. Either the concurrency cap is full or `DRY_RUN` is on. |
+| `in_flight` | A real Devin session is running. This is the number that should match the Devin app. |
+| `work_delivered` | A pull request that needs nothing further from a human. |
+| `awaiting_authorship` | Draft open, waiting on the human paragraph the contribution policy requires. |
+| `escalated` | The session handed the work back rather than guessing. |
+| `errored` | The session failed. |
+
+**ACUs are reported as unknown, not as zero.** The Devin API returns
+`acus_consumed: null` for a session it has not costed yet, and writing that as
+`0.0` would state a cost we do not have; `acus_total` and
+`acus_per_delivered_pr` are `null` — rendered *no data* — until at least one
+session reports a figure, and the average is taken over the sessions that did.
+
 `scoreboard report` emits the funnel and the Sankey edge list. Edges carry
 `stream`, so a downstream chart can colour ribbons by work stream while still
 converging into shared outcome nodes. Facts live in SQLite (`fact_event`,
 `fact_task`, `fact_pr`, `snapshot_daily`) with natural-key upserts, so
 re-running a collection is idempotent.
+
+`scoreboard brief --repo jethac/superset` writes the same picture as markdown —
+thesis verdicts, fleet roster, outbox queue — for pasting into an issue, a
+stand-up note or an email, so the reporting does not depend on someone having
+the dashboard open.
 
 ## The dashboard, and the two trend lines
 
@@ -414,14 +473,31 @@ claim with nothing collected behind it reads *no data* rather than a zero: a
 zero is a claim about the repository, an empty table is a claim about the
 collection.
 
+**Where the work is going** is the Sankey: intake on the left, every task
+leaving through exactly one edge at each stage, losses drawn as named nodes
+rather than as missing ribbons. It is present tense on purpose — most of what it
+shows has not finished, and a diagram captioned *where the work went* would be
+describing a completed programme rather than a running one.
+
+**Fleet** is the roster: every session this deployment knows about, its state,
+its pull request, its ACUs, and whether it is running now. Sessions started
+outside the deployment appear here too if they carry an adopted tag, marked as
+adopted so the funnel never presents them as work it routed. Above it, the
+dispatch DAG draws each fan-out as a node with an edge per session terminating
+in that session's outcome, so a burst of parallel Devins reads as branching and
+you can see how much of a burst actually landed.
+
+**Funnel** is the stage counts and the reconciliation check, stage by stage as
+set out under *Reading the funnel* above.
+
 Two of those claims are series, because "we shipped a lot" is not an outcome and
 neither is "CI is red less often".
 
 **Technical debt.** Superset already publishes a lint-debt dashboard, and it
-says 92 violations. Running the project's own configured rules says 1,470: the
-metrics uploader invokes `npx oxlint --format json` with no `--config`, and the
-project's config is `oxlint.json`, which is not oxlint's auto-discovered
-filename. 85 of the reported 92 are `no-unused-vars`, a rule that config sets to
+says 92 violations. Running the project's own configured rules says thousands —
+4,216 at the commit this deployment last measured: the metrics uploader invokes
+`npx oxlint --format json` with no `--config`, and the project's config is
+`oxlint.json`, which is not oxlint's auto-discovered filename. 85 of the reported 92 are `no-unused-vars`, a rule that config sets to
 `off`. That is [issue #3](https://github.com/jethac/superset/issues/3) on the
 fork, and [#7](https://github.com/jethac/superset/issues/7) covers the `--quiet`
 flag that hides the rest.
@@ -457,14 +533,22 @@ when it is not, rather than reporting a direction it cannot support.
 
 **CI cost per pull request.** [`cicost.py`](src/scoreboard/cicost.py) records
 every job of every pull-request workflow run and reports the median
-compute-minutes a change had to buy, broken down by workflow. Measured on
-`apache/superset` that is roughly 170 minutes, of which `cypress-matrix` — two
-shards kept alive by the last two Cypress specs against 25 Playwright ones — is
-about 20. `savings_if_removed` computes that retirement rather than asserting
-it, which is what turns [issue #6](https://github.com/jethac/superset/issues/6)
-into a number a reader can check.
+compute-minutes a change had to buy, broken down by workflow. Read the figure
+off the page rather than from here: it is a median over a bounded sample of a
+window, so it moves with `--since-days` and `--max-runs`, and quoting a fixed
+number in a README is how a measurement becomes a slogan.
+
+What the breakdown is *for* is retirement arguments. `savings_if_removed` in
+[`cicost.py`](src/scoreboard/cicost.py) computes what dropping a named workflow
+or job would take off the per-pull-request median, which is what turns
+[issue #6](https://github.com/jethac/superset/issues/6) — two Cypress shards
+kept alive by the last two specs against 25 Playwright ones — into a number a
+reader can check rather than a claim they have to accept.
 
 Median, not mean: a couple of retried runs would otherwise decide the answer.
+The thesis card refuses a direction until at least two periods carry three or
+more pull requests each, because a period holding one pull request describes
+that change rather than the project.
 
 ## Security model
 
@@ -510,6 +594,29 @@ title, body and labels.
   malicious release has time to be yanked before we adopt it.
 - `.dockerignore` and `.gitignore` both exclude `.env`, keys and local state.
 
+## Command reference
+
+Every command reads credentials from `.env` and writes to the fact store at
+`DB_PATH` (default `data/facts.db`); each is argued where it is implemented
+above.
+
+| Command | What it does |
+| --- | --- |
+| `init` | Interactive credential wizard; writes `.env` at 0600 and the repository fields in `scope.yaml`. |
+| `serve` | Webhook receiver, report API and dashboard. |
+| `intake` | Read issues, route them, dispatch sessions for what is admitted. |
+| `sync` | Poll started sessions to their outcome, adopt tagged external sessions, grade against policy. |
+| `poll` | `intake` + `sync` on an interval. The scheduled trigger; `--interval 60` in the live profile. |
+| `replay` | Route a saved webhook payload from a file. |
+| `collect` | Read pull requests back out of GitHub and split them agent vs human. |
+| `cicost` | Record billed CI job-minutes per pull-request run. |
+| `measure` | Run oxlint against a checkout and record violations per rule. |
+| `backfill` | Measure historical commits to produce a debt series. |
+| `report` | Print the funnel and the Sankey edge list. |
+| `brief` | Write the markdown status report. |
+| `outbox` | List drafts waiting on a human authorship paragraph. |
+| `simulate` | The offline path: fake Devin client, generated events, for tests only. |
+
 ## Development
 
 ```bash
@@ -549,6 +656,9 @@ Worth stating plainly rather than being caught on:
   opened, so the queue is excluded; for one whose paragraph has since been
   posted it is the moment of posting, so the operator's wait is inside the
   figure. Read `waiting_days` in the outbox for the queue on its own.
+- ACU figures are whatever the Devin API reports. A session it has not costed is
+  recorded as unknown and excluded from the totals rather than counted as zero,
+  so `acus_per_delivered_pr` describes the sessions with a figure, not the fleet.
 - `apache/superset` is an intake-only repository here. Issues are read from it;
   pull requests are opened on the fork, and `assert_writable` refuses an
   upstream target unless `ALLOW_UPSTREAM_WRITE` is set.
