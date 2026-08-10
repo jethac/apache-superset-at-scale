@@ -29,15 +29,160 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
+import platform
 import shutil
 import subprocess
+import sys
+import tarfile
 import tempfile
+import urllib.request
+import zipfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .store import FactStore
+
+# The linter is pinned by version and by digest, and fetched from the project's own release
+# artefacts rather than resolved from a package registry.
+#
+# Two reasons, and the second is the one that matters more here. `npx oxlint` resolves whatever is
+# newest at the moment it runs, downloads it, and executes it — on a host that holds a GitHub token
+# with write access to the fork and a live Devin key. Every other dependency in this repository is
+# pinned: the base image by digest, Python packages by hash under `--require-hashes`, Actions by
+# commit SHA, with a Dependabot cooldown so a malicious release has time to be yanked. One
+# unpinned fetch-and-execute undoes all of it.
+#
+# The second reason is that this module exists to argue a count is uninterpretable without the
+# ruleset that produced it. A linter that silently upgrades between the baseline run and today's
+# is the same defect the module was written to expose, arriving through the back door: the
+# instrument changes and the series reads as a slope. Pinning is what makes two points comparable.
+#
+# To move to a new oxlint: bump the version, replace the digests, and expect the ruleset to change.
+OXLINT_VERSION = "1.77.0"
+OXLINT_RELEASE = "https://github.com/oxc-project/oxc/releases/download/apps_v{version}/{asset}"
+# Digest of the release tarball, and of the binary inside it. Both are pinned because they are
+# checked at different moments: the archive on download, the binary before every run. A cached
+# executable that is never re-checked is a trusted file in a directory the linter's own output
+# gives an attacker a reason to write to.
+OXLINT_ARCHIVE_DIGESTS = {
+    "x86_64-unknown-linux-gnu": "09994ebf16e9cb3537d36847cb07ffc6f096557d3137a95db08fe2d67186c58c",
+    "aarch64-unknown-linux-gnu": "182acc8df9ae90b5b34188ca2334b81e76352a1bba87b7c728087bd7f7cc395e",
+    "x86_64-apple-darwin": "c0fe77e58f54d76afd23800ffb798506c369a48d05bb0068ccbd7f9fe3bd392f",
+    "aarch64-apple-darwin": "ef6e6bd5fcf3c20eb9f8120e559408a252c4ffa0baa4af9bff1780c45b8e2bf6",
+    "x86_64-pc-windows-msvc": "75b927530a3689fb6c319e37666eb1755312869d38e7e254865116021e9f25c8",
+    "aarch64-pc-windows-msvc": "dd4eee251310feaf61945268ab4f5dc0b142baad7264657aad2a20177662a866",
+}
+OXLINT_BINARY_DIGESTS = {
+    "x86_64-unknown-linux-gnu": "db7cdf09d9abe722f7cddc8dbb48dc4152b8c9e9fb3ce54a224622b8701cad86",
+    "aarch64-unknown-linux-gnu": "b48546ba1268ef0381b5bfb07ba80edb51cdf15a837b334ded90e5dbd6150af2",
+    "x86_64-apple-darwin": "0aef541a0ca8f76f532b8353f15c8ce44bba497c46033ba3feeb6e5c41ea85ec",
+    "aarch64-apple-darwin": "d418b2e824b25a05cc426c516258df9c900ad43f7da9d91383c8c4b8fc9283a6",
+    "x86_64-pc-windows-msvc": "89e55ef7336180cf5df6613eec813f6923478d41d7fe364217d08e75ccbd8411",
+    "aarch64-pc-windows-msvc": "7ff03fc28c9660f401ff9d70cf1683e009d8eeb72b79951d77dbbf663a222add",
+}
+
+
+class LinterUnavailableError(RuntimeError):
+    """The pinned linter could not be obtained, or did not match its digest."""
+
+
+def oxlint_target() -> str:
+    """The release artefact for this machine, as a Rust target triple."""
+    machine = platform.machine().lower()
+    arch = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(
+        machine
+    )
+    if arch is None:
+        raise LinterUnavailableError(f"no pinned oxlint build for architecture {machine!r}")
+    if sys.platform.startswith("linux"):
+        return f"{arch}-unknown-linux-gnu"
+    if sys.platform == "darwin":
+        return f"{arch}-apple-darwin"
+    if sys.platform == "win32":
+        return f"{arch}-pc-windows-msvc"
+    raise LinterUnavailableError(f"no pinned oxlint build for platform {sys.platform!r}")
+
+
+def _verify(data: bytes, expected: str, source: str) -> None:
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected:
+        raise LinterUnavailableError(
+            f"{source} does not match its pinned digest "
+            f"(expected {expected}, got {actual}); refusing to run it"
+        )
+
+
+def _sole_member(archive: Path, asset: str) -> bytes:
+    """The single file the release archive is expected to hold, read without unpacking to disk.
+
+    Insisting on exactly one member is not fussiness. Extracting a whole archive by name is how
+    path traversal and unexpected extra payloads get in; reading one member into memory and never
+    honouring a name from the archive avoids the class outright.
+    """
+    if archive.suffix == ".zip":
+        with zipfile.ZipFile(archive) as bundle:
+            names = [name for name in bundle.namelist() if not name.endswith("/")]
+            if len(names) != 1:
+                raise LinterUnavailableError(
+                    f"{asset} held {len(names)} files; expected exactly the oxlint binary"
+                )
+            return bundle.read(names[0])
+    with tarfile.open(archive) as tar:
+        members = [member for member in tar.getmembers() if member.isfile()]
+        if len(members) != 1:
+            raise LinterUnavailableError(
+                f"{asset} held {len(members)} files; expected exactly the oxlint binary"
+            )
+        extracted = tar.extractfile(members[0])
+        if extracted is None:
+            raise LinterUnavailableError(f"{asset} held no readable binary")
+        return extracted.read()
+
+
+def oxlint_binary(cache_dir: Path | None = None) -> Path:
+    """Path to the pinned oxlint, fetching it once into `cache_dir` if it is not already there.
+
+    The digest is checked on download and again on a cached copy, so a cache poisoned after the
+    fact is caught rather than trusted. A mismatch raises: running an unverified linter to avoid
+    an error would produce a number nobody can stand behind, which is worse than no number.
+    """
+    target = oxlint_target()
+    root = cache_dir or Path(os.environ.get("OXLINT_CACHE_DIR") or tempfile.gettempdir())
+    binary = root / f"oxlint-{OXLINT_VERSION}-{target}"
+
+    if binary.exists():
+        _verify(binary.read_bytes(), OXLINT_BINARY_DIGESTS[target], f"cached {binary.name}")
+        return binary
+
+    # Windows releases ship a zip; every other target ships a gzipped tar.
+    asset = f"oxlint-{target}.zip" if target.endswith("windows-msvc") else f"oxlint-{target}.tar.gz"
+    url = OXLINT_RELEASE.format(version=OXLINT_VERSION, asset=asset)
+    try:
+        with urllib.request.urlopen(url, timeout=120) as response:  # noqa: S310 - fixed https URL
+            payload = response.read()
+    except OSError as error:
+        raise LinterUnavailableError(
+            f"could not fetch the pinned oxlint from {url}: {error}"
+        ) from error
+
+    _verify(payload, OXLINT_ARCHIVE_DIGESTS[target], asset)
+
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=root) as staging:
+        archive = Path(staging) / asset
+        archive.write_bytes(payload)
+        payload_binary = _sole_member(archive, asset)
+        _verify(payload_binary, OXLINT_BINARY_DIGESTS[target], f"oxlint binary in {asset}")
+        staged = Path(staging) / "oxlint"
+        staged.write_bytes(payload_binary)
+        staged.chmod(0o755)
+        # Rename last: a reader either sees no binary or sees a fully written, verified one.
+        staged.replace(binary)
+    return binary
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS fact_debt (
@@ -340,6 +485,7 @@ def scan(
     config: str = DEFAULT_CONFIG,
     repo: str | None = None,
     measured_at: datetime | None = None,
+    cache_dir: Path | None = None,
 ) -> list[DebtObservation]:
     """Measure the checkout at `repo_path` with the configuration actually named.
 
@@ -353,13 +499,11 @@ def scan(
     point with the afternoon of the backfill would collapse the series into a single instant.
     """
     frontend = repo_path / "superset-frontend"
-    npx = shutil.which("npx")
-    if npx is None:
-        raise RuntimeError("npx is not on PATH, so oxlint cannot be run")
+    oxlint = oxlint_binary(cache_dir)
 
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as sink:
         subprocess.run(  # noqa: S603 - fixed argument list, no shell, caller-supplied config only
-            [npx, "oxlint", "--config", config, "--format", "json"],
+            [str(oxlint), "--config", config, "--format", "json"],
             cwd=frontend,
             stdout=sink,
             stderr=subprocess.DEVNULL,
