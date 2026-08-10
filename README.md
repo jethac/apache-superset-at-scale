@@ -294,9 +294,9 @@ title, body and labels.
 
   ```bash
   uv pip compile pyproject.toml --generate-hashes --no-header \
-    --python-version 3.12 --exclude-newer 2026-08-01T00:00:00Z -o requirements.txt
+    --python-version 3.12 --exclude-newer 2026-08-02T00:00:00Z -o requirements.txt
   uv pip compile requirements-build.in --generate-hashes --no-header \
-    --python-version 3.12 --exclude-newer 2026-08-01T00:00:00Z -o requirements-build.txt
+    --python-version 3.12 --exclude-newer 2026-08-02T00:00:00Z -o requirements-build.txt
   ```
 
 - Every GitHub Action and pre-commit hook pinned to a **full commit SHA**; a CI
