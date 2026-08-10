@@ -336,7 +336,10 @@ def _describe_change(before: set[str], after: set[str]) -> str:
 
 
 def scan(
-    repo_path: Path, config: str = DEFAULT_CONFIG, repo: str | None = None
+    repo_path: Path,
+    config: str = DEFAULT_CONFIG,
+    repo: str | None = None,
+    measured_at: datetime | None = None,
 ) -> list[DebtObservation]:
     """Measure the checkout at `repo_path` with the configuration actually named.
 
@@ -344,6 +347,10 @@ def scan(
     only an empty document is treated as failure. Output is spooled to a temporary file rather than
     held in a pipe buffer, which is this module's answer to the uploader's `maxBuffer` problem: the
     full-configuration run emits well over a thousand diagnostics.
+
+    `measured_at` defaults to now, which is right for a live run and wrong for a historical one: a
+    caller measuring an old commit is describing that commit's date, and stamping every backfilled
+    point with the afternoon of the backfill would collapse the series into a single instant.
     """
     frontend = repo_path / "superset-frontend"
     npx = shutil.which("npx")
@@ -362,12 +369,12 @@ def scan(
         payload = sink.read()
 
     counts = parse_oxlint_json(payload)
-    measured_at = datetime.now(UTC)
+    stamp = measured_at if measured_at is not None else datetime.now(UTC)
     commit_sha = _head_sha(repo_path)
     identity = ruleset_id(counts)
     return [
         DebtObservation(
-            measured_at=measured_at,
+            measured_at=stamp,
             repo=repo if repo is not None else repo_path.name,
             commit_sha=commit_sha,
             config_path=config,
