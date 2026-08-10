@@ -30,6 +30,8 @@ class FakeRunSource:
     runs: list[WorkflowRunRef] = field(default_factory=list)
     payloads: dict[int, str] = field(default_factory=dict)
     jobs_calls: list[int] = field(default_factory=list)
+    pulls_for_sha: dict[str, int] = field(default_factory=dict)
+    sha_lookups: list[str] = field(default_factory=list)
 
     def list_pull_request_runs(
         self, repo: str, since: datetime, until: datetime
@@ -39,6 +41,10 @@ class FakeRunSource:
     def get_run_jobs(self, repo: str, run_id: int) -> str:
         self.jobs_calls.append(run_id)
         return self.payloads[run_id]
+
+    def pull_request_for_sha(self, repo: str, sha: str) -> int | None:
+        self.sha_lookups.append(sha)
+        return self.pulls_for_sha.get(sha)
 
 
 def jobs_for_pr(pr_number: int, run_id: int, day: datetime) -> list[JobRun]:
@@ -85,6 +91,47 @@ def test_collect_records_pull_request_runs(store: FactStore) -> None:
     assert github.jobs_calls == [500001]
     rows = store.query("SELECT DISTINCT pr_number FROM fact_ci_job")
     assert [int(row["pr_number"]) for row in rows] == [42]
+
+
+def test_a_fork_run_is_attributed_through_its_head_commit(store: FactStore) -> None:
+    """Runs from forks carry no pull request, and dropping them would measure only committers."""
+    github = FakeRunSource(
+        runs=[WorkflowRunRef(run_id=500001, pr_number=None, head_sha="b" * 40)],
+        payloads={500001: FIXTURE},
+        pulls_for_sha={"b" * 40: 4242},
+    )
+    collect(github, store, REPO, WINDOW_START, WINDOW_END)
+
+    rows = store.query("SELECT DISTINCT pr_number FROM fact_ci_job")
+    assert [int(row["pr_number"]) for row in rows] == [4242]
+    assert github.sha_lookups == ["b" * 40]
+
+
+def test_a_commit_is_asked_about_once_however_many_runs_it_has(store: FactStore) -> None:
+    """Every run costs an API call already; re-asking per run would multiply the rate-limit bill."""
+    head = "c" * 40
+    github = FakeRunSource(
+        runs=[
+            WorkflowRunRef(run_id=500001, pr_number=None, head_sha=head),
+            WorkflowRunRef(run_id=500002, pr_number=None, head_sha=head),
+        ],
+        payloads={500001: FIXTURE, 500002: FIXTURE},
+        pulls_for_sha={head: 77},
+    )
+    collect(github, store, REPO, WINDOW_START, WINDOW_END)
+
+    assert github.sha_lookups == [head]
+
+
+def test_a_run_belonging_to_no_pull_request_is_still_recorded(store: FactStore) -> None:
+    """The table is an account of what the runners did, not only of what was attributable."""
+    github = FakeRunSource(
+        runs=[WorkflowRunRef(run_id=500001, pr_number=None, head_sha="d" * 40)],
+        payloads={500001: FIXTURE},
+    )
+    assert collect(github, store, REPO, WINDOW_START, WINDOW_END) == 11
+    rows = store.query("SELECT pr_number FROM fact_ci_job")
+    assert all(row["pr_number"] is None for row in rows)
 
 
 def test_median_ignores_a_duplicated_retry_run(store: FactStore) -> None:

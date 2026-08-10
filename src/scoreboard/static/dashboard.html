@@ -22,6 +22,9 @@
   .tick { color: var(--lz-sys-text-subtlest); fill: currentColor; font-size: 13px; }
   .lbl { color: var(--lz-sys-text-subtle); fill: currentColor; font-size: 13px; }
   .line { color: var(--lz-sys-accent-bold); fill: none; stroke: currentColor; stroke-width: 3; }
+  .fixedline { color: var(--lz-sys-accent-bold); fill: none; stroke: currentColor; stroke-width: 2;
+               stroke-dasharray: 6 4; opacity: 0.75; }
+  .fixeddot { color: var(--lz-sys-accent-bold); fill: var(--lz-sys-surface); stroke: currentColor; stroke-width: 2; }
   .dot { color: var(--lz-sys-accent-bold); fill: currentColor; }
   .break { color: var(--lz-sys-danger-bold); stroke: currentColor; stroke-width: 2; stroke-dasharray: 5 4; }
   .breakmark { color: var(--lz-sys-danger-bold); fill: currentColor; }
@@ -123,6 +126,7 @@
     <div class="card-header">Technical debt over time</div>
     <div class="card-body">
       <svg id="debt" viewBox="0 0 640 300" role="img" aria-label="Technical debt over time"></svg>
+      <p class="legend" id="debtlegend"></p>
       <p class="provenance">
         Every point is Superset's <em>own</em> measurement — <code>oxlint</code> run against the
         rules in the project's <code>oxlint.json</code>, by the project's own
@@ -169,9 +173,30 @@
   <div class="card-header">Authorship outbox <span class="badge" id="outboxcount">0</span></div>
   <div class="card-body">
     <p class="legend">Draft pull requests waiting on a human paragraph. Oldest first.</p>
+    <div class="message message-info">
+      <div class="message-title">Why a finished pull request sits here instead of shipping</div>
+      <p>
+        Apache's
+        <a href="https://www.apache.org/legal/generative-tooling.html">generative tooling policy</a>
+        makes a human contributor accountable for what they submit, and Superset's
+        <a href="https://github.com/apache/superset/wiki/New-Contributor-Welcome-&amp;-Expectations">contributor
+        expectations</a> are enforced socially on top of it: a pull request that reads as entirely
+        machine-written gets closed. So for any repository on the <code>asf-superset</code> profile
+        in <code>policy.yaml</code>, the session opens a <strong>draft</strong> — a draft asks for
+        no reviewer's attention — records which rules the submission fails, and takes the next task.
+        The draft goes ready only when a human has written the paragraph, which the app takes
+        <em>verbatim</em>; there is no facility here for generating or improving that text, because
+        the rule being implemented is that a human wrote it.
+      </p>
+      <p>
+        This queue is therefore the operator's latency, not the fleet's, and it is deliberately
+        measured: the age of a row is how long a human took, and those hours are excluded from
+        delivery timing rather than charged to the agent.
+      </p>
+    </div>
     <table class="table table-hover" id="outbox">
       <thead>
-        <tr><th>Task</th><th>Pull request</th><th class="num">Waiting (days)</th></tr>
+        <tr><th>Task</th><th>Pull request</th><th>Blocked by</th><th class="num">Waiting (days)</th></tr>
       </thead>
       <tbody></tbody>
     </table>
@@ -352,8 +377,12 @@ function empty(target, message) {
 }
 
 /* Debt: one polyline per comparable run. A point that is not comparable to its predecessor
-   starts a new run, and the gap between the runs is marked and labelled. */
-function drawDebt(points, now) {
+   starts a new run, and the gap between the runs is marked and labelled.
+
+   The dashed line is the same measurements restricted to the rules every run measured, which is
+   the only series that can be read end to end. It sits below the solid one because it counts
+   fewer rules, not because debt is lower than reported. */
+function drawDebt(points, comparable, now) {
   var target = document.getElementById("debt");
   if (!points.length) { empty(target, "No debt measurements yet."); return; }
 
@@ -383,6 +412,25 @@ function drawDebt(points, now) {
       parts.push('<polyline class="line" points="' + d + '"/>');
     }
   });
+
+  if (comparable.length > 1 && comparable.length === points.length) {
+    var fixedTip = "<b>Like-for-like.</b><br>The same runs counting only the " +
+      esc(comparable[0].rules) + " rule(s) all of them measured.<br>" +
+      "Lower than the headline because it counts fewer rules, not because debt is lower.";
+    parts.push('<polyline class="fixedline" data-tip="' + esc(fixedTip) + '" points="' +
+      comparable.map(function (c, i) { return xs[i] + "," + sc.y(c.total); }).join(" ") + '"/>');
+    comparable.forEach(function (c, i) {
+      parts.push('<circle class="fixeddot" cx="' + xs[i] + '" cy="' + sc.y(c.total) +
+        '" r="4" data-tip="' + esc("<b>" + stamp(c.measured_at) + "</b><br>" + c.total +
+          " violations on the " + c.rules + " rules measured by every run") + '"/>');
+    });
+    document.getElementById("debtlegend").innerHTML =
+      '<span class="swatch solid"></span> as reported by the project ' +
+      '<span class="swatch dashed"></span> like-for-like: only the ' + esc(comparable[0].rules) +
+      ' rule(s) every run measured';
+  } else {
+    document.getElementById("debtlegend").textContent = "";
+  }
 
   for (var j = 0; j < points.length; j += 1) {
     var point = points[j];
@@ -749,15 +797,20 @@ function drawOutbox(items) {
   pill.className = items.length ? "lozenge lozenge-inprogress" : "lozenge lozenge-success";
   var body = document.querySelector("#outbox tbody");
   if (!items.length) {
-    body.innerHTML = '<tr><td colspan="3">Nothing waiting on a human paragraph.</td></tr>';
+    body.innerHTML = '<tr><td colspan="4">Nothing waiting on a human paragraph.</td></tr>';
     return;
   }
   body.innerHTML = items.map(function (item) {
     var link = item.pr_url
       ? '<a href="' + esc(item.pr_url) + '">' + esc(item.title || item.pr_url) + '</a>'
       : esc(item.title || "");
+    var blocked = (item.blocked_by || []).map(function (name) {
+      return '<code>' + esc(name) + '</code>';
+    }).join(" ") || "—";
+    var profile = item.profile ? " " + esc(item.profile) : "";
     return "<tr><td><code>" + esc(item.task_id) + "</code></td><td>" + link +
-      '</td><td class="num">' + esc(item.waiting_days) + "</td></tr>";
+      "</td><td>" + blocked + '<span class="legend">' + profile + "</span></td>" +
+      '<td class="num">' + esc(item.waiting_days) + "</td></tr>";
   }).join("");
 }
 
@@ -796,7 +849,7 @@ function render(data) {
   drawThesis(data.thesis || []);
   drawThroughput(throughput);
   drawDispatch(data.dispatch_graph || { nodes: [], edges: [] }, now);
-  drawDebt(data.debt || [], now);
+  drawDebt(data.debt || [], data.debt_comparable || [], now);
   drawCiCost(data.ci_cost || [], now);
   drawSankey(data.flow || []);
   drawFleet(data.fleet || [], now);

@@ -43,6 +43,9 @@ class FakeGitHub:
         self.jobs_calls.append(run_id)
         return jobs_payload(run_id)
 
+    def pull_request_for_sha(self, repo: str, sha: str) -> int | None:
+        return None
+
 
 def jobs_payload(run_id: int) -> str:
     """The sample jobs response, re-stamped onto one run, as GitHub would return it."""

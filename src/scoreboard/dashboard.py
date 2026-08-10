@@ -147,6 +147,35 @@ def debt_payload(
     return payload
 
 
+def debt_comparable_payload(points: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    """The same measurements restricted to the rules every one of them measured.
+
+    Rules enter and leave the configured set as the project edits `oxlint.json`, so consecutive
+    raw totals are rarely comparable and a series of honest points can still refuse to answer
+    "is debt falling". Holding the rule set fixed at the intersection answers it without pretending
+    the instrument never changed: the totals are smaller than the headline count because they
+    describe fewer rules, and a rule absent from any run is dropped rather than counted as zero.
+    """
+    by_rule_sets = [set(cast(dict[str, int], point["by_rule"])) for point in points]
+    if not by_rule_sets:
+        return []
+    shared = set.intersection(*by_rule_sets)
+    if not shared:
+        return []
+    return [
+        {
+            "measured_at": point["measured_at"],
+            "total": sum(
+                count
+                for rule, count in cast(dict[str, int], point["by_rule"]).items()
+                if rule in shared
+            ),
+            "rules": len(shared),
+        }
+        for point in points
+    ]
+
+
 def ci_cost_payload(
     store: FactStore, repo: str, period: str = "week", series: CostSeriesFn | None = None
 ) -> list[dict[str, object]]:
@@ -404,15 +433,7 @@ def _debt_claim(points: Sequence[dict[str, object]]) -> dict[str, object]:
             run = []
         run.append(point)
     if len(run) < 2:
-        return {
-            "status": "not yet comparable",
-            "value": run[-1]["total"],
-            "unit": "violations",
-            "detail": (
-                "only one measurement since the rule set last changed, so there is nothing "
-                "honest to compare it against yet"
-            ),
-        }
+        return _fixed_ruleset_claim(points)
     first = float(cast(float, run[0]["total"]))
     last = float(cast(float, run[-1]["total"]))
     return {
@@ -424,6 +445,42 @@ def _debt_claim(points: Sequence[dict[str, object]]) -> dict[str, object]:
         "detail": (
             f"{int(first)} to {int(last)} across {len(run)} comparable measurements of the "
             "project's configured rule set"
+        ),
+    }
+
+
+def _fixed_ruleset_claim(points: Sequence[dict[str, object]]) -> dict[str, object]:
+    """The like-for-like answer when no two consecutive raw totals measured the same rules.
+
+    Superset edits its rule set often enough that the raw series is a string of one-point runs, and
+    a card that only ever says "not yet comparable" answers the reviewer's question with a shrug.
+    Restricting to the rules common to every run is a real comparison, so long as the card says
+    that is what it is.
+    """
+    comparable = debt_comparable_payload(points)
+    if len(comparable) < 2:
+        return {
+            "status": "not yet comparable",
+            "value": points[-1]["total"],
+            "unit": "violations",
+            "detail": (
+                "only one measurement since the rule set last changed, so there is nothing "
+                "honest to compare it against yet"
+            ),
+        }
+    first = float(cast(float, comparable[0]["total"]))
+    last = float(cast(float, comparable[-1]["total"]))
+    rules = int(cast(int, comparable[-1]["rules"]))
+    return {
+        "status": _verdict(first, last, want_down=True),
+        "value": last,
+        "unit": "violations",
+        "from": first,
+        "since": comparable[0]["measured_at"],
+        "detail": (
+            f"{int(first)} to {int(last)} on the {rules} rules measured by all "
+            f"{len(comparable)} runs; the configured set changed in between, so the headline "
+            f"count of {points[-1]['total']} is not comparable across them"
         ),
     }
 
@@ -523,12 +580,19 @@ def funnel_payload(store: FactStore) -> dict[str, int]:
 
 
 def outbox_payload(store: FactStore) -> list[dict[str, object]]:
-    """Drafts waiting on a human paragraph, oldest first, each linked to its pull request."""
+    """Drafts waiting on a human paragraph, oldest first, each linked to its pull request.
+
+    The failing checks travel with the row so the page can name the rule holding the draft back
+    rather than leaving a reviewer to read "awaiting authorship" as a stalled agent.
+    """
     return [
         {
             "task_id": item.task_id,
             "pr_url": item.pr_url,
             "title": item.title,
+            "profile": item.profile,
+            "target_repo": item.target_repo,
+            "blocked_by": item.failing_checks,
             "waiting_days": round(item.waiting_days, 2),
         }
         for item in list_outbox(store)
@@ -551,6 +615,7 @@ def dashboard_payload(
     """
     measured = measure_repo or repo
     throughput = throughput_payload(store, repo, cost_series=cost_series, measure_repo=measured)
+    debt = debt_payload(store, measured, series=debt_series)
     return {
         "repo": repo,
         "measure_repo": measured,
@@ -563,7 +628,8 @@ def dashboard_payload(
             cost_series=cost_series,
             measure_repo=measured,
         ),
-        "debt": debt_payload(store, measured, series=debt_series),
+        "debt": debt,
+        "debt_comparable": debt_comparable_payload(debt),
         "ci_cost": ci_cost_payload(store, measured, series=cost_series),
         "throughput": throughput,
         "flow": flow_payload(store),

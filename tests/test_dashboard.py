@@ -23,6 +23,7 @@ from scoreboard.dashboard import (
     build_router,
     ci_cost_payload,
     dashboard_payload,
+    debt_comparable_payload,
     debt_payload,
     fleet_payload,
     flow_payload,
@@ -159,6 +160,27 @@ def test_debt_payload_never_infers_comparability_from_the_ruleset_id() -> None:
     assert payload[1]["ruleset_change"] == "counting method changed"
 
 
+def test_the_comparable_series_holds_the_rule_set_fixed_across_every_run() -> None:
+    """Totals over the shared rules are smaller than the headline count, and that is the point."""
+    comparable = debt_comparable_payload(
+        debt_payload(FactStore(":memory:"), REPO, fake_debt_series)
+    )
+
+    assert [entry["total"] for entry in comparable] == [400, 350, 92]
+    assert {entry["rules"] for entry in comparable} == {1}
+
+
+def test_a_rule_no_run_shares_leaves_nothing_to_compare() -> None:
+    """Counting a rule as zero where it was never measured would invent a fall in debt."""
+    points = [
+        FakeDebtPoint(DAY, REPO, "a", 10, {"eqeqeq": 10}, True, ""),
+        FakeDebtPoint(DAY + timedelta(days=1), REPO, "b", 4, {"no-console": 4}, False, "swapped"),
+    ]
+    payload = debt_payload(FactStore(":memory:"), REPO, series=lambda store, repo: points)
+
+    assert debt_comparable_payload(payload) == []
+
+
 def test_ci_cost_payload_rounds_and_keeps_the_workflow_breakdown() -> None:
     payload = ci_cost_payload(FactStore(":memory:"), REPO, series=fake_cost_series)
 
@@ -232,7 +254,11 @@ def test_throughput_excludes_running_sessions_from_the_delivery_rate(
 def test_the_debt_claim_never_compares_across_a_ruleset_change(
     store: FactStore, scope: ScopeConfig
 ) -> None:
-    """The last point is not comparable to its predecessor, so the claim must not span the break."""
+    """The last point is not comparable to its predecessor, so raw totals must not be subtracted.
+
+    677 to 92 would be the headline arithmetic and it is meaningless: two rules left the tracker
+    between them. The claim falls back to the one rule every run measured, and says so.
+    """
     seed(store, scope)
     throughput = throughput_payload(store, REPO, cost_series=fake_cost_series)
 
@@ -240,9 +266,11 @@ def test_the_debt_claim_never_compares_across_a_ruleset_change(
         store, REPO, throughput, debt_series=fake_debt_series, cost_series=fake_cost_series
     )
 
-    assert debt["status"] == "not yet comparable"
+    assert debt["from"] == 400
     assert debt["value"] == 92
-    assert "from" not in debt
+    assert debt["status"] == "improving"
+    assert "1 rules measured by all 3 runs" in str(debt["detail"])
+    assert "677" not in str(debt["detail"])
     assert cost["status"] == "improving"
     assert shipped["unit"] == "issues shipped"
 

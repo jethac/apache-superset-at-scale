@@ -182,6 +182,36 @@ def test_run_jobs_are_returned_as_the_body_github_sent() -> None:
     assert requests[0].url.params["per_page"] == "100"
 
 
+def test_a_head_commit_names_the_pull_request_the_run_belongs_to() -> None:
+    """The Actions API leaves `pull_requests` empty for fork branches; the commit still knows."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=[{"number": 4242}, {"number": 9}])
+
+    assert client_with(handler).pull_request_for_sha(REPO, HEAD_SHA) == 4242
+    assert requests[0].url.path == f"/repos/{REPO}/commits/{HEAD_SHA}/pulls"
+
+
+def test_a_commit_on_no_pull_request_resolves_to_nothing() -> None:
+    """Pushes to master run the same workflows and must not be attributed to a pull request."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    assert client_with(handler).pull_request_for_sha(REPO, HEAD_SHA) is None
+
+
+def test_a_commit_github_cannot_find_resolves_to_nothing() -> None:
+    """A commit garbage-collected after a force-push 404s, which is missing data, not an outage."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    assert client_with(handler).pull_request_for_sha(REPO, HEAD_SHA) is None
+
+
 def test_a_failed_jobs_read_raises_instead_of_returning_an_error_document() -> None:
     """An error body would parse as zero jobs, and a run would silently cost nothing."""
 

@@ -191,6 +191,25 @@ class HttpGitHubClient:
             )
         return runs
 
+    def pull_request_for_sha(self, repo: str, sha: str) -> int | None:
+        """The pull request a commit belongs to, for runs the Actions API cannot attribute.
+
+        `workflow_runs[].pull_requests` is populated only when the head branch lives in the same
+        repository, so on a project whose contributions arrive from forks it is empty for almost
+        every run. Attributing minutes by head commit instead is what makes a cost-per-pull-request
+        figure describe the project rather than the handful of branches pushed by committers.
+        """
+        response = self._client.get(f"/repos/{repo}/commits/{sha}/pulls", params={"per_page": 1})
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        pulls = response.json()
+        if not isinstance(pulls, list) or not pulls:
+            return None
+        first = pulls[0]
+        number = first.get("number") if isinstance(first, dict) else None
+        return int(number) if number is not None else None
+
     def get_run_jobs(self, repo: str, run_id: int) -> str:
         response = self._client.get(
             f"/repos/{repo}/actions/runs/{run_id}/jobs", params={"per_page": 100}

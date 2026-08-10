@@ -94,6 +94,8 @@ class WorkflowRunSource(Protocol):
 
     def get_run_jobs(self, repo: str, run_id: int) -> str: ...
 
+    def pull_request_for_sha(self, repo: str, sha: str) -> int | None: ...
+
 
 def ensure_schema(store: FactStore) -> None:
     with _connect(store) as connection:
@@ -212,8 +214,12 @@ def collect(
     """Record the jobs of every pull-request workflow run in a window; return rows written.
 
     The pull request number comes from the run, not from the jobs payload, which does not carry
-    it. Runs GitHub cannot attribute to a pull request are still recorded, with a null number, so
-    the table stays a faithful account of what the runners did.
+    it. Where the run does not name one — the Actions API leaves `pull_requests` empty whenever the
+    head branch lives in a fork, which on Superset is nearly every contribution — the head commit
+    is asked which pull request it belongs to. Without that second read the median would describe
+    only the handful of pull requests pushed by committers. Runs neither read can attribute are
+    still recorded, with a null number, so the table stays a faithful account of what the runners
+    did.
 
     `max_runs` bounds the walk for repositories that run thousands of jobs a day: each run costs
     an API call, and the figure this feeds is a median, which a bounded sample of the window
@@ -222,9 +228,15 @@ def collect(
     ensure_schema(store)
     written = 0
     runs = github.list_pull_request_runs(repo, since, until)
+    resolved: dict[str, int | None] = {}
     for run in runs[:max_runs] if max_runs else runs:
+        pr_number = run.pr_number
+        if pr_number is None and run.head_sha:
+            if run.head_sha not in resolved:
+                resolved[run.head_sha] = github.pull_request_for_sha(repo, run.head_sha)
+            pr_number = resolved[run.head_sha]
         jobs = [
-            replace(job, pr_number=run.pr_number, head_sha=job.head_sha or run.head_sha)
+            replace(job, pr_number=pr_number, head_sha=job.head_sha or run.head_sha)
             for job in parse_jobs(github.get_run_jobs(repo, run.run_id), repo)
         ]
         if not jobs:
