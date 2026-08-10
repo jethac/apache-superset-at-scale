@@ -33,7 +33,18 @@ ENV PATH="/opt/venv/bin:$PATH" \
     SCOPE_PATH=/app/scope.yaml \
     POLICY_PATH=/app/policy.yaml
 
-RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin scoreboard \
+# git is a runtime dependency, not a convenience: `backfill` measures historical commits in
+# throwaway worktrees and `measure` records the commit it measured, so without it the debt series
+# cannot be produced at all. Installed from the base image's own signed Debian suite rather than a
+# third-party repository, with recommends off and the lists dropped in the same layer.
+#
+# It is here so the debt commands run inside this container. The alternative — a Python and Node
+# toolchain on the host — is how they used to run, and it put the linter next to the deployment's
+# credentials for no reason: measuring lint violations needs a checkout and nothing else.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin scoreboard \
     && mkdir -p /data \
     && chown -R scoreboard:scoreboard /data
 
