@@ -186,7 +186,17 @@ title, body and labels.
 - Base image pinned by **digest**, not tag, in both build stages.
 - All dependencies resolved to a hash-pinned `requirements.txt` and installed
   with `--require-hashes --no-deps`, so a compromised index cannot substitute a
-  wheel. CI recompiles the lock and diffs it.
+  wheel. CI recompiles the lock and diffs it, resolving with `--exclude-newer`
+  so the diff fails on a real input change rather than on any upstream release.
+  Regenerate with:
+
+  ```bash
+  uv pip compile pyproject.toml --generate-hashes --no-header \
+    --python-version 3.12 --exclude-newer 2026-08-01T00:00:00Z -o requirements.txt
+  uv pip compile requirements-build.in --generate-hashes --no-header \
+    --python-version 3.12 --exclude-newer 2026-08-01T00:00:00Z -o requirements-build.txt
+  ```
+
 - Every GitHub Action and pre-commit hook pinned to a **full commit SHA**; a CI
   job fails the build if any `uses:` is on a mutable ref.
 - Workflows are `permissions: contents: read` by default, opting in per job.
