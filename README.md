@@ -46,6 +46,30 @@ approval click, so the queue collects the artifact the rule actually asks for;
 and the debt series treats a ruleset change as an instrument change and draws a
 break rather than a slope. Each is argued where it is implemented.
 
+## Two repositories, and why they are not the same one
+
+There are two repository names in the configuration and they do different jobs.
+
+`scope.yaml`'s `defaults.target_repo` — `jethac/superset` — is the **write
+target**: where the fleet's pull requests land, and the repository the funnel,
+the Sankey and the fleet roster describe. `MEASURE_REPO`, defaulting to
+`apache/superset` in [`config.py`](src/scoreboard/config.py), is the
+**measurement target**: the codebase the debt series and the CI cost series are
+computed against. `dashboard_payload` takes both and keeps them apart —
+`throughput` and `flow` come from the write target, `debt` and `ci_cost` from
+the measurement target — and the document it returns names each of them.
+
+The split is the point, not a convenience. The problem being measured is
+Superset's — 1,470 lint violations, roughly 170 CI minutes for every change —
+and it exists whether or not this deployment ever runs. Measuring the fork's own
+CI instead would describe the deployment's activity rather than the debt it
+exists to shrink, and would make the "before" column a property of when we
+started. So upstream is read in both directions and written in neither:
+`assert_writable` in [`github.py`](src/scoreboard/github.py) raises on any
+upstream target unless `ALLOW_UPSTREAM_WRITE` is set, which it is not by
+default, and the GitHub token you are told to create below is not granted
+upstream write either.
+
 ## Run it live
 
 Four commands from a clean checkout to a Devin session the automation started
@@ -133,6 +157,7 @@ image layer.
 | `DEVIN_API_KEY` | Devin service-user or personal API key (`apk_user_…`), sent as `Authorization: Bearer`. SSO governs webapp and org login; it is not the API credential. |
 | `DEVIN_ORG_ID` | Needed only for the org repository-listing check, which is advisory. |
 | `GITHUB_TOKEN` | Read on every intake repository; write only on the fork. |
+| `MEASURE_REPO` | Default `apache/superset`: the repository the debt and CI-cost series describe, which is not the repository the fleet writes to. |
 | `WEBHOOK_SECRET` | HMAC secret for GitHub deliveries. Unset means *every* webhook is rejected. |
 | `DRY_RUN` | Default `true`: route and record, create no sessions. |
 | `ALLOW_UPSTREAM_WRITE` | Default `false`: refuse to target an upstream repository. |
@@ -242,10 +267,13 @@ fastest way to make an agent deployment unwelcome in a project you do not own.
 ## Contribution policy and the authorship outbox
 
 [`policy.yaml`](policy.yaml) holds the target project's rules for AI-assisted
-contributions, selected per repository. Apache Superset's contributor
-expectations are not advisory: a pull request that reads as entirely
-machine-written is tagged `lacks-human-authorship` and closed, so the
-deployment has to know the rules before it writes rather than after.
+contributions, selected per repository. The `asf-superset` profile encodes two
+published sources — the ASF's generative tooling policy
+(<https://www.apache.org/legal/generative-tooling.html>) and Superset's new
+contributor expectations — and neither is advisory in practice: a pull request
+that reads as entirely machine-written is tagged `lacks-human-authorship` and
+closed. The deployment therefore has to know the rules before it writes rather
+than after.
 
 The profile is applied twice. At intake, `prompt_section` renders it into the
 session prompt — `Generated-by:` trailer, AI disclosure section, local test
@@ -256,8 +284,13 @@ in `fact_policy_check`, so compliance is queryable evidence rather than a claim.
 What the agent cannot supply is the paragraph in a human's own voice. Rather
 than parking the session until someone is available, it opens a draft and moves
 on; the draft lands in the outbox in state `draft_awaiting_authorship`, which is
-its own node in the funnel and the Sankey. The age of that queue measures the
-operator's latency, not the deployment's.
+its own node in the funnel and the Sankey and counts as delivered work the
+moment the draft opens. The age of that queue is reported separately, per item,
+as `waiting_days`: it measures how long the operator took, and it is not the
+agent's delivery time. The exception is a draft that has since been cleared,
+whose `updated_at` moves to the moment the paragraph was posted, so its
+contribution to `median_hours_to_delivery` does include the wait — noted again
+under Limitations.
 
 ```bash
 scoreboard outbox                       # what is waiting, and for how long
@@ -273,8 +306,11 @@ ready only once every blocking check passes. Tone findings are recorded but do
 not block.
 
 There is no generate, improve, or rewrite affordance anywhere in this path, and
-`tests/test_policy.py` asserts its absence. A button that writes the paragraph
-would satisfy the check while defeating the rule it implements.
+`tests/test_policy.py` asserts its absence. The submitted text is spliced into
+the pull request body exactly as received, never reflowed or edited. A button
+that writes the paragraph would satisfy the check while defeating the rule it
+implements, and the app has no such button and no model call on this path at
+all.
 
 ## Reporting
 
@@ -292,21 +328,49 @@ measurement, not by fixtures.
 
 ```bash
 scoreboard measure --checkout ../superset
+scoreboard backfill --checkout ../superset --months 12
 scoreboard cicost --repo apache/superset --since-days 30
 scoreboard cicost --repo apache/superset --since-days 60 --until-days 30
 ```
 
-`scoreboard measure --checkout <path to a superset clone>` runs oxlint against
-that working tree under the project's own `oxlint.json` and records the real
-violation count per rule, together with the rule set it measured and the commit
-it measured at. `--repo` names the repository the checkout is of and `--config`
-points at a different oxlint configuration if you want one.
+`scoreboard measure --checkout <path to a superset clone>` shells out to `npx
+oxlint --config oxlint.json --format json` inside that clone's
+`superset-frontend`, counts the diagnostics per rule, and records them with the
+set of rules it saw and the commit it measured at. `--repo` names the repository
+the checkout is of and `--config` points at a different oxlint configuration.
+oxlint exits non-zero whenever it reports anything, so only an empty document is
+treated as a failure, and output is spooled to a temporary file rather than a
+pipe — the full-configuration run emits well over a thousand diagnostics, which
+is the `maxBuffer` problem Superset's own uploader hits.
+
+One measurement is a point, not a series. `scoreboard backfill --checkout
+<clone> --months 12` produces the history by measuring commits as they stood:
+one commit per month boundary, each checked out into a throwaway `git worktree`
+so your working tree is untouched, each stamped with its commit's author date
+rather than the afternoon of the backfill. Commits whose tree has no oxlint
+configuration are skipped rather than measured bare, which leaves a gap — that
+is what a missing measurement is supposed to look like. It refuses to run
+against a shallow clone instead of reporting an empty series.
 
 `scoreboard cicost --repo apache/superset --since-days 30 [--until-days N]
 [--max-runs N]` reads GitHub Actions runs on pull requests in that window and
-records each job's billed minutes. `--until-days` ends the window N days ago,
-which is how you back-sample earlier periods to get a second point to compare
-against. Both need a token with Actions: read on the repository you point it at.
+records each job's billed minutes — elapsed job time, so queueing is excluded,
+which is what GitHub bills. `--until-days` ends the window N days ago, which is
+how you back-sample earlier periods to get a second point to compare against.
+Both need a token with Actions: read on the repository you point it at.
+
+**Fork-originated runs have to be attributed by commit.** The Actions API only
+populates `workflow_runs[].pull_requests` when the head branch lives in the same
+repository, and on Superset almost every contribution arrives from a fork, so
+for most runs that array is empty. Where it is, `collect` in
+[`cicost.py`](src/scoreboard/cicost.py) asks `GET
+/repos/{repo}/commits/{sha}/pulls` which pull request the head commit belongs
+to, and caches the answer per commit. Skipping that second read would not lose
+a few rows at the margin: the surviving rows would be exactly the runs pushed by
+people with commit access, so the median would describe committers rather than
+contributors, and would be reported as though it described the project. Runs
+that neither read can attribute are still stored with a null pull-request
+number, and `cost_per_pr` excludes them from the median rather than guessing.
 
 `--max-runs` (default 40; `0` reads the whole window) bounds what is otherwise
 an expensive walk: one API call per run, against a repository that runs
@@ -355,6 +419,22 @@ is marked not comparable, the page draws a break with the entering and departing
 rules named, and `series_on_fixed_ruleset` omits — never zero-fills — a rule
 that was not measured. A line that slopes smoothly through an instrument change
 is the defect this replaces, not the product.
+
+That honesty leaves a reviewer with a series that often refuses to answer "is
+debt falling", so `dashboard_payload` emits a second one. `debt` is the headline
+total per run under whatever rules that run measured. `debt_comparable` is the
+same runs restricted to the intersection — only the rules *every* run measured —
+summed per run, with the rule count attached. The page draws the second dashed
+under the first, and the legend says which is which. Two things follow, and both
+need saying out loud rather than being left to a tooltip. The dashed line sits
+lower than the solid one because it counts fewer rules, not because debt is
+lower than reported. And a fall in the solid line is not evidence of anything on
+its own: the number can drop because violations were fixed or because rules
+stopped being measured, and only the dashed line distinguishes those. That is
+not a hypothetical failure mode — it is precisely what happened to the published
+series between 677 and 92. The `Technical debt falls` thesis card reads the
+comparable series for its verdict and says the headline count is not comparable
+when it is not, rather than reporting a direction it cannot support.
 
 **CI cost per pull request.** [`cicost.py`](src/scoreboard/cicost.py) records
 every job of every pull-request workflow run and reports the median
@@ -437,7 +517,19 @@ Worth stating plainly rather than being caught on:
   by setup.
 - `scoreboard cicost` reads a bounded sample of pull-request runs, capped by
   `--max-runs`. The median it reports estimates the window; it does not
-  enumerate it.
+  enumerate it. Runs that neither the Actions payload nor the commit's pull
+  request list can attribute are recorded with no pull-request number and left
+  out of the median.
+- The headline debt series is not comparable across rule-set changes, and the
+  dashboard says so rather than smoothing it. The comparable series answers the
+  trend question on the rules common to every run, which is fewer rules than the
+  project configures today; it is a like-for-like number, not the project's
+  debt.
+- `median_hours_to_delivery` measures a task from creation to its last state
+  change. For a draft still waiting in the outbox that is the moment the draft
+  opened, so the queue is excluded; for one whose paragraph has since been
+  posted it is the moment of posting, so the operator's wait is inside the
+  figure. Read `waiting_days` in the outbox for the queue on its own.
 - `apache/superset` is an intake-only repository here. Issues are read from it;
   pull requests are opened on the fork, and `assert_writable` refuses an
   upstream target unless `ALLOW_UPSTREAM_WRITE` is set.
