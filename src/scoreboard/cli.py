@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -46,6 +47,16 @@ def _build_parser() -> argparse.ArgumentParser:
     intake.add_argument("--repo", action="append", required=True)
     intake.add_argument("--since-days", type=int, default=30)
 
+    subparsers.add_parser("sync", help="poll started Devin sessions and record their outcomes")
+
+    poll = subparsers.add_parser(
+        "poll", help="run intake and sync on an interval: the scheduled trigger"
+    )
+    poll.add_argument("--repo", action="append", required=True)
+    poll.add_argument("--since-days", type=int, default=30)
+    poll.add_argument("--interval", type=int, default=300, help="seconds between passes")
+    poll.add_argument("--passes", type=int, default=0, help="stop after N passes; 0 runs forever")
+
     collect = subparsers.add_parser("collect", help="collect PR facts for a window")
     collect.add_argument("--repo", required=True)
     collect.add_argument("--since-days", type=int, default=90)
@@ -61,6 +72,18 @@ def _build_parser() -> argparse.ArgumentParser:
     replay.add_argument("path", type=Path)
 
     return parser
+
+
+def _intake(
+    github: HttpGitHubClient, orchestrator: Orchestrator, repos: list[str], since_days: int
+) -> None:
+    since = datetime.now(UTC) - timedelta(days=since_days)
+    for repo in repos:
+        for event in github.list_issues(repo, since):
+            task = orchestrator.handle(event)
+            logging.info(
+                "%s#%s -> %s (%s)", repo, event.number, task.state.value, task.decision.reason
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,6 +164,13 @@ def main(argv: list[str] | None = None) -> int:
         allow_upstream_write=settings.allow_upstream_write,
     )
 
+    if args.command == "sync":
+        moved = orchestrator.sync()
+        for task_id, state in moved:
+            logging.info("%s -> %s", task_id, state.value)
+        logging.info("%d session(s) reached an outcome", len(moved))
+        return 0
+
     if args.command == "replay":
         payload = json.loads(Path(args.path).read_text(encoding="utf-8"))
         task = orchestrator.handle(from_github("replay", args.event, payload))
@@ -160,17 +190,19 @@ def main(argv: list[str] | None = None) -> int:
     github = HttpGitHubClient(settings.github_token, settings.github_api_url)
 
     if args.command == "intake":
-        since = datetime.now(UTC) - timedelta(days=args.since_days)
-        for repo in args.repo:
-            for event in github.list_issues(repo, since):
-                task = orchestrator.handle(event)
-                logging.info(
-                    "%s#%s -> %s (%s)",
-                    repo,
-                    event.number,
-                    task.state.value,
-                    task.decision.reason,
-                )
+        _intake(github, orchestrator, args.repo, args.since_days)
+        return 0
+
+    if args.command == "poll":
+        passes = 0
+        while args.passes == 0 or passes < args.passes:
+            _intake(github, orchestrator, args.repo, args.since_days)
+            for task_id, state in orchestrator.sync():
+                logging.info("%s -> %s", task_id, state.value)
+            passes += 1
+            if args.passes and passes >= args.passes:
+                break
+            time.sleep(args.interval)
         return 0
 
     if args.command == "collect":

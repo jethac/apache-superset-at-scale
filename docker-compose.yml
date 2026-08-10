@@ -32,6 +32,43 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
+  # The scheduled trigger. The webhook covers events GitHub pushes; this covers
+  # the ones it does not (issues filed while the receiver was down, upstream
+  # repositories we have no webhook on) and polls started sessions for their
+  # outcomes, so a session's reported state is never just true-at-launch.
+  poller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fde-scoreboard:local
+    profiles: ["live"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DB_PATH: /data/facts.db
+      SCOPE_PATH: /app/scope.yaml
+      POLICY_PATH: /app/policy.yaml
+      DRY_RUN: ${DRY_RUN:-true}
+      ALLOW_UPSTREAM_WRITE: ${ALLOW_UPSTREAM_WRITE:-false}
+    command:
+      - poll
+      - --repo=jethac/superset
+      - --repo=apache/superset
+      - --interval=300
+    volumes:
+      - facts:/data
+      - ./scope.yaml:/app/scope.yaml:ro
+      - ./policy.yaml:/app/policy.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
   # One-shot offline demo: no credentials, no network calls.
   simulate:
     build:

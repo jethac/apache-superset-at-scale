@@ -102,3 +102,45 @@ def test_sankey_edges_carry_the_stream(store: FactStore, scope: ScopeConfig) -> 
     edges = build_edges(store)
     assert edges
     assert {edge.stream for edge in edges} == {"bugfix"}
+
+
+class WorkingThenFinished(FakeDevinClient):
+    """A session that reports no outcome at creation and a pull request on the next poll."""
+
+    def create_session(self, request: object) -> SessionState:  # type: ignore[override]
+        return SessionState(
+            session_id="s-working",
+            status="running",
+            status_detail="working",
+            pr_url=None,
+            acus_consumed=0.4,
+            structured_output={},
+        )
+
+    def get_session(self, session_id: str) -> SessionState:
+        return SessionState(
+            session_id=session_id,
+            status="blocked",
+            status_detail="finished",
+            pr_url="https://github.com/jethac/superset/pull/4242",
+            acus_consumed=3.1,
+            structured_output={"outcome": "pr_opened"},
+        )
+
+
+def test_sync_moves_a_still_working_session_to_its_outcome(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    runner = Orchestrator(scope=scope, store=store, devin=WorkingThenFinished(), dry_run=False)
+    task = runner.handle(make_event(labels=["bug"]))
+    assert task.state is TaskState.SESSION_STARTED
+    assert funnel(store)["in_flight"] == 1
+
+    moved = runner.sync()
+
+    assert moved == [(task.task_id, TaskState.WORK_DELIVERED)]
+    counts = funnel(store)
+    assert counts["in_flight"] == 0
+    assert counts["work_delivered"] == 1
+    assert reconciles(counts)
+    assert runner.sync() == []

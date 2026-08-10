@@ -123,6 +123,56 @@ class Orchestrator:
         self.store.upsert_task(task)
         return task
 
+    def sync(self, now: datetime | None = None) -> list[tuple[str, TaskState]]:
+        """Poll every started session and move the ones that have reached an outcome.
+
+        Starting a session is the cheap half of managing one. Without this the funnel would
+        report whatever was true at creation time and `in_flight` would only ever grow, so the
+        poller is what makes the reported outcome a fact about the session rather than about the
+        moment it was launched. Run it on a schedule alongside `intake`.
+        """
+        moment = now or datetime.now(UTC)
+        moved: list[tuple[str, TaskState]] = []
+
+        for row in self.store.tasks_awaiting_session_outcome():
+            session_id = str(row["session_id"])
+            state = self.devin.get_session(session_id)
+            resolved = _state_for(state.status_detail, state.pr_url, state.structured_output)
+            if resolved is TaskState.SESSION_STARTED:
+                continue
+
+            target_repo = str(row["target_repo"] or self.scope.defaults.target_repo)
+            profile = self.policy.for_repo(target_repo) if self.policy else None
+            is_draft = False
+            if state.pr_url and profile is not None:
+                results = evaluate(
+                    profile,
+                    _submission_from(state.pr_url, state.structured_output),
+                )
+                self.store.record_policy_checks(
+                    str(row["task_id"]),
+                    state.pr_url,
+                    str(row["policy_profile"] or ""),
+                    results,
+                    moment,
+                )
+                if profile.contribution.require_human_authorship:
+                    resolved = TaskState.DRAFT_AWAITING_AUTHORSHIP
+                    is_draft = profile.contribution.open_as_draft
+
+            self.store.record_session_outcome(
+                task_id=str(row["task_id"]),
+                state=resolved.value,
+                pr_url=state.pr_url,
+                pr_is_draft=is_draft,
+                acus_consumed=state.acus_consumed or 0.0,
+                updated_at=moment,
+            )
+            logger.info("%s -> %s (session %s)", row["task_id"], resolved.value, session_id)
+            moved.append((str(row["task_id"]), resolved))
+
+        return moved
+
     def _apply_policy(
         self,
         task: Task,
@@ -135,16 +185,7 @@ class Orchestrator:
         own state so the funnel shows the queue rather than counting it as finished, and so the
         age of that queue is measurable.
         """
-        output = structured_output or {}
-        submission = Submission(
-            pr_url=task.pr_url or "",
-            body=str(output.get("pr_body") or ""),
-            commit_message=str(output.get("commit_message") or ""),
-            authorship_text=None,
-            tests_run=bool(output.get("tests_run")),
-            adversarial_review_run=bool(output.get("adversarial_review_run")),
-        )
-        results = evaluate(profile, submission)
+        results = evaluate(profile, _submission_from(task.pr_url or "", structured_output))
         self.store.record_policy_checks(
             task.task_id,
             task.pr_url or "",
@@ -156,6 +197,23 @@ class Orchestrator:
             task.pr_is_draft = profile.contribution.open_as_draft
             return TaskState.DRAFT_AWAITING_AUTHORSHIP
         return task.state
+
+
+def _submission_from(pr_url: str, structured_output: dict[str, object] | None) -> Submission:
+    """Read what the session reported into the shape the policy grader checks.
+
+    `authorship_text` is always absent here: the paragraph is the one field the automation is
+    forbidden to supply, so a session can never satisfy that check on a human's behalf.
+    """
+    output = structured_output or {}
+    return Submission(
+        pr_url=pr_url,
+        body=str(output.get("pr_body") or ""),
+        commit_message=str(output.get("commit_message") or ""),
+        authorship_text=None,
+        tests_run=bool(output.get("tests_run")),
+        adversarial_review_run=bool(output.get("adversarial_review_run")),
+    )
 
 
 def _state_for(

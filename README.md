@@ -127,6 +127,21 @@ picked up before anything acts.
 `scoreboard intake --repo jethac/superset --repo apache/superset` polls issues
 directly. Both are useful when you cannot expose a public URL.
 
+### Managing the sessions, not just starting them
+
+Starting a session is the cheap half. `scoreboard sync` polls every session in
+`session_started` and moves it to the outcome it actually reached — pull request,
+no-action-needed, escalation, or failure — recording ACUs and grading the result
+against the contribution policy on the way. Without it the funnel would report
+what was true at launch and `in_flight` could only grow.
+
+`scoreboard poll --repo jethac/superset --repo apache/superset --interval 300`
+is the two together on a timer, and is the `poller` service in
+`docker-compose.yml` (`--profile live`). That is the scheduled trigger: webhooks
+cover what GitHub pushes to us, the poller covers what it does not — upstream
+repositories we hold no webhook on, and deliveries missed while the receiver was
+down.
+
 ## Scope rules
 
 [`scope.yaml`](scope.yaml) is ordered data, not hidden routing code. Conditions
