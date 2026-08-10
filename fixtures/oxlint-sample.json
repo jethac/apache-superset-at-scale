@@ -1,0 +1,56 @@
+{
+  "diagnostics": [
+    {
+      "severity": "warning",
+      "code": "eslint(no-unused-vars)",
+      "message": "Variable 'props' is declared but never used.",
+      "filename": "src/components/Chart/Chart.tsx"
+    },
+    {
+      "severity": "warning",
+      "code": "eslint(no-unused-vars)",
+      "message": "Variable 'theme' is declared but never used.",
+      "filename": "src/dashboard/components/Header/index.jsx"
+    },
+    {
+      "severity": "warning",
+      "code": "eslint(no-unused-vars)",
+      "message": "Import 't' is declared but never used.",
+      "filename": "src/explore/components/DataTableControl/index.tsx"
+    },
+    {
+      "severity": "warning",
+      "plugin": "react-hooks",
+      "code": "exhaustive-deps",
+      "message": "React Hook useEffect has a missing dependency: 'formData'.",
+      "filename": "src/explore/ExploreViewContainer/index.jsx"
+    },
+    {
+      "severity": "warning",
+      "plugin": "react-hooks",
+      "code": "exhaustive-deps",
+      "message": "React Hook useCallback has a missing dependency: 'onChange'.",
+      "filename": "src/filters/components/Select/SelectFilterPlugin.tsx"
+    },
+    {
+      "severity": "warning",
+      "rule": "prefer-destructuring",
+      "plugin": "eslint",
+      "message": "Use object destructuring.",
+      "filename": "src/utils/getClientErrorObject.ts"
+    },
+    {
+      "severity": "warning",
+      "code": "no-console",
+      "plugin": "eslint",
+      "message": "Unexpected console statement.",
+      "filename": "src/setup/setupErrorMessages.ts"
+    },
+    {
+      "severity": "error",
+      "code": "no-debugger",
+      "message": "'debugger' statement is not allowed.",
+      "filename": "src/SqlLab/components/SqlEditor/index.jsx"
+    }
+  ]
+}
