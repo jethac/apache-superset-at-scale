@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """The kinds of external signal the automation reacts to."""
 
     ISSUE = "issue"
@@ -22,7 +22,7 @@ class EventType(str, Enum):
     SCHEDULE = "schedule"
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     NONE = "none"
     LOW = "low"
     MEDIUM = "medium"
@@ -91,7 +91,7 @@ class Decision(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
-class TaskState(str, Enum):
+class TaskState(StrEnum):
     """Terminal and in-flight states for a unit of work.
 
     A task is one triggering event, not one session: retries and child sessions belong to the

@@ -304,8 +304,7 @@ class FactStore:
     ) -> None:
         with self._tx() as connection:
             connection.execute(
-                "UPDATE fact_task SET state = ?, pr_is_draft = ?, updated_at = ?"
-                " WHERE task_id = ?",
+                "UPDATE fact_task SET state = ?, pr_is_draft = ?, updated_at = ? WHERE task_id = ?",
                 (state, int(pr_is_draft), updated_at.isoformat(), task_id),
             )
 
