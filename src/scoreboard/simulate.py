@@ -114,7 +114,22 @@ def _fixture_pull_requests(repo: str, agent_pr_urls: list[str]) -> list[PullRequ
 
 # Installed as a wheel there is no repository root above the package, so the container points
 # at its own copy.
-FIXTURES = Path(os.environ.get("FIXTURES_PATH") or Path(__file__).resolve().parents[2] / "fixtures")
+def _fixtures_dir() -> Path:
+    """Where the seed data lives, which depends on how the package was installed.
+
+    Editable from a checkout it sits above the package; installed into a container it is copied
+    next to the config files; on a CI runner only the working directory is a checkout.
+    """
+    candidates = [
+        Path(configured) if (configured := os.environ.get("FIXTURES_PATH")) else None,
+        Path(__file__).resolve().parents[2] / "fixtures",
+        Path.cwd() / "fixtures",
+    ]
+    for candidate in candidates:
+        if candidate is not None and candidate.is_dir():
+            return candidate
+    return Path.cwd() / "fixtures"
+
 
 # The rule set the demo trend is scoped to, with the counts measured under the project's own
 # config. Fixing the collector's missing --config changes what
@@ -149,7 +164,9 @@ def _seed_trends(store: FactStore, repo: str, weeks: int = 12) -> None:
     included because the instrument change it contains — fourteen rules leaving the tracker at
     non-zero counts — is the thing the page has to render as a break rather than an improvement.
     """
-    debt.ingest_csv(store, FIXTURES / "debt-history.csv")
+    history = _fixtures_dir() / "debt-history.csv"
+    if history.is_file():
+        debt.ingest_csv(store, history)
     cicost.ensure_schema(store)
 
     start = datetime.now(UTC) - timedelta(weeks=weeks)
