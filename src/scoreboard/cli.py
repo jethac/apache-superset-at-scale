@@ -12,7 +12,7 @@ from pathlib import Path
 
 import uvicorn
 
-from . import cicost, debt
+from . import backfill, cicost, debt
 from .collector import Collector
 from .config import Settings
 from .devin import FakeDevinClient, HttpDevinClient
@@ -83,6 +83,20 @@ def _build_parser() -> argparse.ArgumentParser:
     measure.add_argument("--checkout", type=Path, required=True, help="path to a Superset clone")
     measure.add_argument("--repo", default="apache/superset", help="repository the checkout is of")
     measure.add_argument("--config", default=debt.DEFAULT_CONFIG)
+
+    backfill_parser = subparsers.add_parser(
+        "backfill", help="measure historical commits of a checkout to produce a debt series"
+    )
+    backfill_parser.add_argument(
+        "--checkout", type=Path, required=True, help="path to a Superset clone"
+    )
+    backfill_parser.add_argument(
+        "--repo", default="apache/superset", help="repository the checkout is of"
+    )
+    backfill_parser.add_argument(
+        "--months", type=int, default=12, help="how many monthly points to measure"
+    )
+    backfill_parser.add_argument("--config", default=debt.DEFAULT_CONFIG)
 
     subparsers.add_parser("report", help="print the funnel and the Sankey edge list")
 
@@ -237,6 +251,17 @@ def main(argv: list[str] | None = None) -> int:
             sum(observation.count for observation in observations),
             len(observations),
             args.repo,
+        )
+        return 0
+
+    if args.command == "backfill":
+        backfilled = backfill.backfill(
+            store, args.checkout, repo=args.repo, months=args.months, config=args.config
+        )
+        logging.info(
+            "measured %d commit(s), skipped %d",
+            len(backfilled.measured),
+            len(backfilled.skipped),
         )
         return 0
 
