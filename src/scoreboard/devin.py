@@ -232,6 +232,6 @@ class FakeDevinClient:
         return [
             Repository(repo_path="jethac/superset", host="github.com", indexed=True),
             Repository(
-                repo_path="jethac/cognition-take-home-test", host="github.com", indexed=True
+                repo_path="jethac/apache-superset-at-scale", host="github.com", indexed=True
             ),
         ]
