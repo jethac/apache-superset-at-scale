@@ -1,7 +1,7 @@
 [project]
 name = "scoreboard"
 version = "0.1.0"
-description = "Event-driven Devin automation and deployment scoreboard for the Superset fork"
+description = "Devin @ apache/superset: event-driven Devin automation and its scoreboard"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi==0.141.1",
