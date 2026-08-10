@@ -106,8 +106,15 @@ Then point a GitHub webhook at `POST /webhook/github` with content type
 | `POST /outbox/{task_id}/authorship` | Submit that paragraph and mark the draft ready. |
 | `GET /dashboard` | Operator page: debt and CI-cost trends, flow, funnel, outbox. |
 | `GET /dashboard/data` | The page's single JSON document, if you would rather read it raw. |
+| `GET /dashboard/lozenge.min.css` | The vendored design system the page is styled with. |
 | `GET /compliance` | Per-pull-request policy evidence: which checks ran, which passed. |
 | `POST /webhook/github` | Signed event intake. |
+
+The page is styled with [Lozenge](https://github.com/jethac/lozenge), vendored as a built
+stylesheet and served by this container: it charts with the design system's tokens, so the trends
+follow the scheme and contrast dial rather than a hard-coded palette. Nothing is fetched at page
+load — a CDN reference would be unreviewed code arriving from outside the image, and the container
+runs without egress anyway. `src/scoreboard/static/VENDOR.md` records the commit it was built from.
 
 While `DRY_RUN=true` the service routes, deduplicates and records every event
 but starts no sessions — which is exactly what you want for the first day

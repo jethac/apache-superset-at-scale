@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol, cast
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from fastapi.responses import HTMLResponse
 
 from .flow import build_edges, funnel
@@ -31,6 +31,7 @@ from .store import FactStore
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DASHBOARD_HTML = STATIC_DIR / "dashboard.html"
+LOZENGE_CSS = STATIC_DIR / "lozenge.min.css"
 
 
 class DebtPoint(Protocol):
@@ -224,6 +225,15 @@ def build_router(store: FactStore, repo: str) -> APIRouter:
     def read_dashboard() -> HTMLResponse:
         """The page itself: one static file, no build step, no external asset."""
         return HTMLResponse(DASHBOARD_HTML.read_text(encoding="utf-8"))
+
+    @router.get("/dashboard/lozenge.min.css")
+    def read_stylesheet() -> Response:
+        """The design system, vendored and served from this container rather than from a CDN."""
+        return Response(
+            LOZENGE_CSS.read_text(encoding="utf-8"),
+            media_type="text/css",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
 
     @router.get("/dashboard/data")
     def read_dashboard_data() -> dict[str, object]:

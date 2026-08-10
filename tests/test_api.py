@@ -110,3 +110,12 @@ def test_dashboard_is_mounted_and_serves_its_data(client: TestClient) -> None:
     assert client.get("/dashboard").status_code == 200
     payload = client.get("/dashboard/data").json()
     assert set(payload) >= {"repo", "debt", "ci_cost", "flow", "funnel", "outbox"}
+
+
+def test_dashboard_serves_its_stylesheet_itself(client: TestClient) -> None:
+    """The page references the design system by path, so the container must answer for it."""
+    response = client.get("/dashboard/lozenge.min.css")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/css")
+    assert "--lz-sys-" in response.text
