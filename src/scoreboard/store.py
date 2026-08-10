@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .github import PullRequestFact
-from .models import Authorship, Task
+from .models import Authorship, Task, TaskState
 from .policy import CheckResult
 
 SCHEMA = """
@@ -307,6 +307,44 @@ class FactStore:
                 "UPDATE fact_task SET state = ?, pr_is_draft = ?, updated_at = ?"
                 " WHERE task_id = ?",
                 (state, int(pr_is_draft), updated_at.isoformat(), task_id),
+            )
+
+    def tasks_awaiting_session_outcome(self) -> list[sqlite3.Row]:
+        """Tasks whose session was started but has not yet reached an outcome.
+
+        A session that is still working is not a failure and not a delivery; it is a row the
+        poller has to come back to, which is why the funnel keeps `in_flight` as its own bucket.
+        """
+        with self._lock:
+            return list(
+                self._connection.execute(
+                    "SELECT task_id, session_id, target_repo, policy_profile FROM fact_task"
+                    " WHERE session_id IS NOT NULL AND state = ?",
+                    (TaskState.SESSION_STARTED.value,),
+                ).fetchall()
+            )
+
+    def record_session_outcome(
+        self,
+        task_id: str,
+        state: str,
+        pr_url: str | None,
+        pr_is_draft: bool,
+        acus_consumed: float,
+        updated_at: datetime,
+    ) -> None:
+        with self._tx() as connection:
+            connection.execute(
+                "UPDATE fact_task SET state = ?, pr_url = COALESCE(?, pr_url), pr_is_draft = ?,"
+                " acus_consumed = ?, updated_at = ? WHERE task_id = ?",
+                (
+                    state,
+                    pr_url,
+                    int(pr_is_draft),
+                    acus_consumed,
+                    updated_at.isoformat(),
+                    task_id,
+                ),
             )
 
     def record_snapshot(self, day: datetime, counter_name: str, value: float) -> None:
