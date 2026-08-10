@@ -82,7 +82,11 @@ def test_every_section_renders_from_a_populated_store(store: FactStore, scope: S
 
 
 def test_the_verdicts_are_the_payloads_own_words(store: FactStore, scope: ScopeConfig) -> None:
-    """The brief may not reach a verdict of its own, nor tidy away the one the payload reached."""
+    """The brief may not reach a verdict of its own, nor tidy away the one the payload reached.
+
+    The incomparable headline total is looked for in the thesis section alone: elsewhere the
+    brief prints timestamps, and any three digits will eventually appear inside one.
+    """
     seed(store, scope)
     throughput = throughput_payload(store, REPO, cost_series=fake_cost_series)
     claims = thesis_payload(
@@ -100,7 +104,8 @@ def test_the_verdicts_are_the_payloads_own_words(store: FactStore, scope: ScopeC
     for claim in claims:
         assert str(claim["status"]) in text
         assert str(claim["detail"]) in text
-    assert "677" not in text
+    thesis = text.split("## The thesis, in three claims", 1)[1].split("\n## ", 1)[0]
+    assert "677" not in thesis
 
 
 def test_a_claim_the_payload_will_not_settle_keeps_its_own_wording() -> None:
