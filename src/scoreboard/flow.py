@@ -7,6 +7,11 @@ stream rather than the node name.
 Flow is conserved by construction: every task that enters leaves through exactly one edge at each
 stage, including the ones that went nowhere. Losses are named nodes, never missing ribbons — a
 diagram that can quietly drop its failures is worthless as evidence.
+
+Admitted work is dispatched into a session before it can produce anything, so `In flight` is a
+stage rather than an outcome: every admitted task crosses it, and only the ones whose session has
+not settled stop there. Drawing it as a sibling of the outcomes would put running work in the same
+column as a delivered draft and read as though the two were the same stage.
 """
 
 from __future__ import annotations
@@ -36,14 +41,14 @@ class FlowEdge:
     task_count: int
 
 
-_TERMINALS: dict[TaskState, str] = {
+_OUTCOMES: dict[TaskState, str] = {
     TaskState.WORK_DELIVERED: NODE_DELIVERED,
     TaskState.DRAFT_AWAITING_AUTHORSHIP: NODE_AWAITING_AUTHORSHIP,
     TaskState.ESCALATED: NODE_ESCALATED,
     TaskState.ERRORED: NODE_ERRORED,
-    TaskState.SESSION_STARTED: NODE_IN_FLIGHT,
-    TaskState.TRIGGERED: NODE_IN_FLIGHT,
 }
+
+_UNSETTLED: frozenset[TaskState] = frozenset({TaskState.SESSION_STARTED, TaskState.TRIGGERED})
 
 
 def build_edges(store: FactStore) -> list[FlowEdge]:
@@ -73,7 +78,9 @@ def build_edges(store: FactStore) -> list[FlowEdge]:
             continue
 
         counts[(stream, NODE_INTAKE, NODE_ADMITTED)] += 1
-        counts[(stream, NODE_ADMITTED, _TERMINALS[state])] += 1
+        counts[(stream, NODE_ADMITTED, NODE_IN_FLIGHT)] += 1
+        if state not in _UNSETTLED:
+            counts[(stream, NODE_IN_FLIGHT, _OUTCOMES[state])] += 1
 
     return [
         FlowEdge(stream=stream, source=source, target=target, task_count=count)
