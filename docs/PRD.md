@@ -1,4 +1,4 @@
-# PRD — Deployment Scoreboard
+# PRD — Devin @ apache/superset
 
 **Status:** draft · **Owner:** Jetha · **Target repo under measurement:** `jethac/superset`
 

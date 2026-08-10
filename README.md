@@ -169,7 +169,7 @@ Then point a GitHub webhook at `POST /webhook/github` with content type
 | `GET /funnel` | Current funnel counts and reconciliation status. |
 | `GET /outbox` | Draft pull requests waiting on a human authorship paragraph. |
 | `POST /outbox/{task_id}/authorship` | Submit that paragraph and mark the draft ready. |
-| `GET /dashboard` | Operator page: debt and CI-cost trends, flow, funnel, outbox. |
+| `GET /dashboard` | Operator page: Trends, Where the work is going, Fleet, Funnel. |
 | `GET /dashboard/data` | The page's single JSON document, if you would rather read it raw. |
 | `GET /dashboard/lozenge.min.css` | The vendored design system the page is styled with. |
 | `GET /compliance` | Per-pull-request policy evidence: which checks ran, which passed. |
@@ -285,16 +285,54 @@ historical baseline can be reconstructed for a period long before the
 deployment existed — the comparison that survives scrutiny is agent versus
 *contemporaneous* human, not agent versus the past.
 
+### Measuring the two trends for real
+
+Both trend series are recorded by commands you run against the repository under
+measurement, not by fixtures.
+
+```bash
+scoreboard measure --checkout ../superset
+scoreboard cicost --repo apache/superset --since-days 30
+scoreboard cicost --repo apache/superset --since-days 60 --until-days 30
+```
+
+`scoreboard measure --checkout <path to a superset clone>` runs oxlint against
+that working tree under the project's own `oxlint.json` and records the real
+violation count per rule, together with the rule set it measured and the commit
+it measured at. `--repo` names the repository the checkout is of and `--config`
+points at a different oxlint configuration if you want one.
+
+`scoreboard cicost --repo apache/superset --since-days 30 [--until-days N]
+[--max-runs N]` reads GitHub Actions runs on pull requests in that window and
+records each job's billed minutes. `--until-days` ends the window N days ago,
+which is how you back-sample earlier periods to get a second point to compare
+against. Both need a token with Actions: read on the repository you point it at.
+
+`--max-runs` (default 40; `0` reads the whole window) bounds what is otherwise
+an expensive walk: one API call per run, against a repository that runs
+thousands of jobs a day. The consequence is worth stating plainly — the figure
+that comes out is a median over a sample of the window, not a census of it.
+Raise the cap when you want a tighter estimate and are willing to pay the API
+calls for it.
+
 `scoreboard report` emits the funnel and the Sankey edge list. Edges carry
 `stream`, so a downstream chart can colour ribbons by work stream while still
 converging into shared outcome nodes. Facts live in SQLite (`fact_event`,
 `fact_task`, `fact_pr`, `snapshot_daily`) with natural-key upserts, so
 re-running a collection is idempotent.
 
-## The two trend lines
+## The dashboard, and the two trend lines
 
-Above the flow diagram the page carries two series, because "we shipped a lot"
-is not an outcome and neither is "CI is red less often".
+The page leads with a thesis in three claims — technical debt down, CI
+compute-minutes per pull request down (the P0), more issues shipped over time —
+and then four tabs that are the evidence for them: **Trends**, **Where the work
+is going**, **Fleet** and **Funnel**. Each claim carries its own status, and a
+claim with nothing collected behind it reads *no data* rather than a zero: a
+zero is a claim about the repository, an empty table is a claim about the
+collection.
+
+Two of those claims are series, because "we shipped a lot" is not an outcome and
+neither is "CI is red less often".
 
 **Technical debt.** Superset already publishes a lint-debt dashboard, and it
 says 92 violations. Running the project's own configured rules says 1,470: the
@@ -397,8 +435,19 @@ Worth stating plainly rather than being caught on:
 - The wizard cannot confirm Devin's Git integration with a user-scoped key, so
   "Devin can clone the target" is asserted by the first live session rather than
   by setup.
-- The CI-cost collector reads workflow jobs from the GitHub API and has been
-  exercised against fixtures, not against a live token.
+- `scoreboard cicost` reads a bounded sample of pull-request runs, capped by
+  `--max-runs`. The median it reports estimates the window; it does not
+  enumerate it.
+- `apache/superset` is an intake-only repository here. Issues are read from it;
+  pull requests are opened on the fork, and `assert_writable` refuses an
+  upstream target unless `ALLOW_UPSTREAM_WRITE` is set.
+- The wizard's Devin org repository-listing check is advisory. A user-scoped key
+  gets a 403 from
+  `GET /v3beta1/organizations/{org}/repositories`, which says nothing about
+  whether Devin can clone, so the result is reported rather than enforced.
+- Any figure with no facts behind it renders as *no data*, not as a zero. A zero
+  is a claim about the repository; an empty table is a claim about the
+  collection, and the page does not conflate them.
 - Throughput without a paired quality metric is trivially gamed by filing
   trivial pull requests. The PRD makes the pairing binding; do not report one
   without the other.

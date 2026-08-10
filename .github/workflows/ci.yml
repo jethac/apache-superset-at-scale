@@ -60,15 +60,15 @@ jobs:
           context: .
           push: false
           load: true
-          tags: fde-scoreboard:ci
+          tags: scoreboard:ci
 
       - name: Simulation runs with no network and no credentials
         run: |
           docker run --rm --network none \
             -e DB_PATH=/tmp/facts.db \
-            fde-scoreboard:ci simulate --events 32
+            scoreboard:ci simulate --events 32
 
       - name: Container does not run as root
         run: |
-          uid="$(docker run --rm --entrypoint id fde-scoreboard:ci -u)"
+          uid="$(docker run --rm --entrypoint id scoreboard:ci -u)"
           test "$uid" != "0"
