@@ -25,6 +25,21 @@ on deployment day. Get this backwards and the "before" column of a before/after
 report is empty, and the whole thing becomes an assertion rather than a
 measurement. See [`docs/PRD.md`](docs/PRD.md) for the full rationale.
 
+## Running instance
+
+<https://apachesuperset.jethachan.net> — the operator page, public and read-only,
+served by this repository's own container. Numbers there are collected facts, not
+fixtures. The authorship outbox's write endpoint is the one path behind auth.
+
+The clearest single outcome so far is not on that page, because the page measures
+a repository rather than a contribution:
+[apache/superset#42955](https://github.com/apache/superset/pull/42955) is merged
+into Apache Superset. It began as the fork's
+[#5](https://github.com/jethac/superset/pull/5), authored by
+`app/devin-ai-integration` against an issue this deployment routed — an agent
+finding a measurement defect in a project nobody here owns, and the fix landing
+in it.
+
 ## Where to look first
 
 If you are reviewing this rather than operating it, the three things worth
@@ -362,8 +377,13 @@ all.
 ## Reporting
 
 `scoreboard collect --repo jethac/superset --since-days 90` reads pull requests
-back out of GitHub and labels each one `agent` or `human` by matching its URL
-against attributed tasks. Because the cohort split is derived from GitHub, the
+back out of GitHub and sorts each into `agent`, `dependabot`, `unattributed` or
+`human`. `agent` requires a URL match against an attributed task, because that
+is the only thing that proves *this* deployment produced a change. What the rest
+must not do is land in `human`: a machine-authored pull request counted there —
+Devin's own integration account among them — inflates the cohort it is the
+control for, and F10's agent-versus-contemporaneous-human comparison does not
+survive the agent appearing on both sides of it. Because the cohort split is derived from GitHub, the
 historical baseline can be reconstructed for a period long before the
 deployment existed — the comparison that survives scrutiny is agent versus
 *contemporaneous* human, not agent versus the past.
@@ -380,8 +400,8 @@ scoreboard cicost --repo apache/superset --since-days 30
 scoreboard cicost --repo apache/superset --since-days 60 --until-days 30
 ```
 
-`scoreboard measure --checkout <path to a superset clone>` shells out to `npx
-oxlint --config oxlint.json --format json` inside that clone's
+`scoreboard measure --checkout <path to a superset clone>` runs
+`oxlint --config oxlint.json --format json` inside that clone's
 `superset-frontend`, counts the diagnostics per rule, and records them with the
 set of rules it saw and the commit it measured at. `--repo` names the repository
 the checkout is of and `--config` points at a different oxlint configuration.
@@ -493,14 +513,24 @@ set out under *Reading the funnel* above.
 Two of those claims are series, because "we shipped a lot" is not an outcome and
 neither is "CI is red less often".
 
-**Technical debt.** Superset already publishes a lint-debt dashboard, and it
-says 92 violations. Running the project's own configured rules says thousands —
-4,216 at the commit this deployment last measured: the metrics uploader invokes
-`npx oxlint --format json` with no `--config`, and the project's config is
-`oxlint.json`, which is not oxlint's auto-discovered filename. 85 of the reported 92 are `no-unused-vars`, a rule that config sets to
-`off`. That is [issue #3](https://github.com/jethac/superset/issues/3) on the
-fork, and [#7](https://github.com/jethac/superset/issues/7) covers the `--quiet`
-flag that hides the rest.
+**Technical debt.** Superset published a lint-debt dashboard reporting 92
+violations. Running the project's own configured rules reported **1,470**,
+because the metrics uploader invoked `npx oxlint --format json` with no
+`--config` and the project's config is `oxlint.json`, which is not oxlint's
+auto-discovered filename. 85 of the reported 92 were `no-unused-vars`, a rule
+that config sets to `off`. That was
+[issue #3](https://github.com/jethac/superset/issues/3) on the fork, and
+[#7](https://github.com/jethac/superset/issues/7) covers the `--quiet` flag that
+hides the rest.
+
+Past tense, as of 2026-08-10: the fix is
+[apache/superset#42955](https://github.com/apache/superset/pull/42955), merged
+upstream, which originated as the fork's Devin-authored
+[#5](https://github.com/jethac/superset/pull/5). Upstream now measures itself
+with `--config oxlint.json` and reports 1,470 — the number this deployment had
+been reporting against it. The defect that motivated the measurement is closed;
+the measurement is what remains, and the series below is why that is not the
+same thing as the debt being gone.
 
 The published series also *appears* to fall, from 677 to 92. It does not. Every
 drop lines up with rules leaving the tracker: on 2026-05-13, fourteen rules
@@ -587,6 +617,15 @@ title, body and labels.
 
 - Every GitHub Action and pre-commit hook pinned to a **full commit SHA**; a CI
   job fails the build if any `uses:` is on a mutable ref.
+- **oxlint is pinned by version and by SHA-256**, taken from the oxc project's
+  release artefacts rather than resolved from npm. `scoreboard measure` used to
+  shell out to `npx oxlint`, which downloads and executes whatever the registry
+  serves at that moment — on a host holding a GitHub token with write access to
+  the fork and a live Devin key. The archive is checked on download and the
+  binary again before every run, so a cache poisoned afterwards is caught rather
+  than trusted, and a mismatch refuses to run. It is also a correctness control:
+  a linter that upgrades itself between two runs changes the rule set silently,
+  which is the exact defect [`debt.py`](src/scoreboard/debt.py) exists to expose.
 - Workflows are `permissions: contents: read` by default, opting in per job.
 - Container runs as a non-root user, read-only root filesystem, all capabilities
   dropped, `no-new-privileges`; the demo profile runs with `network_mode: none`.
