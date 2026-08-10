@@ -12,6 +12,7 @@ from pathlib import Path
 
 import uvicorn
 
+from . import backfill, cicost, debt
 from .collector import Collector
 from .config import Settings
 from .devin import FakeDevinClient, HttpDevinClient
@@ -21,6 +22,7 @@ from .normalize import from_github
 from .orchestrator import Orchestrator
 from .outbox import list_outbox
 from .policy import PolicyConfig
+from .report import build_report
 from .scope import ScopeConfig
 from .simulate import render, run_simulation
 from .store import FactStore
@@ -28,7 +30,10 @@ from .wizard import run_wizard
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="scoreboard", description="FDE deployment scoreboard")
+    parser = argparse.ArgumentParser(
+        prog="scoreboard",
+        description="Devin @ apache/superset: event-driven automation and its scoreboard",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init", help="interactive setup wizard for GitHub and Devin credentials")
@@ -61,7 +66,48 @@ def _build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--repo", required=True)
     collect.add_argument("--since-days", type=int, default=90)
 
+    cicost_parser = subparsers.add_parser(
+        "cicost", help="record billed CI job-minutes for pull-request runs"
+    )
+    cicost_parser.add_argument("--repo", required=True)
+    cicost_parser.add_argument("--since-days", type=int, default=30)
+    cicost_parser.add_argument(
+        "--until-days", type=int, default=0, help="end the window N days ago, for back-sampling"
+    )
+    cicost_parser.add_argument(
+        "--max-runs", type=int, default=40, help="cap runs read per window; 0 reads all of it"
+    )
+
+    measure = subparsers.add_parser(
+        "measure", help="run oxlint against a checkout and record the violation counts"
+    )
+    measure.add_argument("--checkout", type=Path, required=True, help="path to a Superset clone")
+    measure.add_argument("--repo", default="apache/superset", help="repository the checkout is of")
+    measure.add_argument("--config", default=debt.DEFAULT_CONFIG)
+
+    backfill_parser = subparsers.add_parser(
+        "backfill", help="measure historical commits of a checkout to produce a debt series"
+    )
+    backfill_parser.add_argument(
+        "--checkout", type=Path, required=True, help="path to a Superset clone"
+    )
+    backfill_parser.add_argument(
+        "--repo", default="apache/superset", help="repository the checkout is of"
+    )
+    backfill_parser.add_argument(
+        "--months", type=int, default=12, help="how many monthly points to measure"
+    )
+    backfill_parser.add_argument("--config", default=debt.DEFAULT_CONFIG)
+
     subparsers.add_parser("report", help="print the funnel and the Sankey edge list")
+
+    brief = subparsers.add_parser(
+        "brief", help="write the markdown status report for pasting into an issue or an email"
+    )
+    brief.add_argument(
+        "--repo", help="repository whose sessions the brief covers; defaults to the scope target"
+    )
+    brief.add_argument("--out", type=Path, help="write to FILE instead of stdout")
 
     subparsers.add_parser(
         "outbox", help="list draft pull requests waiting on a human authorship paragraph"
@@ -146,6 +192,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "brief":
+        # The trend tables belong to their own modules, so a store written before they landed
+        # still produces a brief that says "no data" rather than failing on a missing table.
+        debt.ensure_schema(store)
+        cicost.ensure_schema(store)
+        markdown = build_report(
+            store,
+            args.repo or scope.defaults.target_repo,
+            measure_repo=settings.measure_repo,
+        )
+        if args.out:
+            Path(args.out).write_text(markdown, encoding="utf-8")
+            logging.info("wrote %s", args.out)
+        else:
+            print(markdown, end="")
+        return 0
+
     devin = (
         HttpDevinClient(
             settings.devin_api_key, settings.devin_base_url, org_id=settings.devin_org_id
@@ -203,6 +266,42 @@ def main(argv: list[str] | None = None) -> int:
             if args.passes and passes >= args.passes:
                 break
             time.sleep(args.interval)
+        return 0
+
+    if args.command == "measure":
+        observations = debt.scan(args.checkout, config=args.config, repo=args.repo)
+        debt.ensure_schema(store)
+        debt.record_run(store, observations)
+        logging.info(
+            "recorded %d violations across %d rules for %s",
+            sum(observation.count for observation in observations),
+            len(observations),
+            args.repo,
+        )
+        return 0
+
+    if args.command == "backfill":
+        backfilled = backfill.backfill(
+            store, args.checkout, repo=args.repo, months=args.months, config=args.config
+        )
+        logging.info(
+            "measured %d commit(s), skipped %d",
+            len(backfilled.measured),
+            len(backfilled.skipped),
+        )
+        return 0
+
+    if args.command == "cicost":
+        now = datetime.now(UTC)
+        written = cicost.collect(
+            github,
+            store,
+            args.repo,
+            now - timedelta(days=args.since_days),
+            now - timedelta(days=args.until_days),
+            max_runs=args.max_runs or None,
+        )
+        logging.info("recorded %d CI job(s) from %s", written, args.repo)
         return 0
 
     if args.command == "collect":

@@ -28,6 +28,7 @@ def client(tmp_path: Path) -> TestClient:
         scope_path=REPO_ROOT / "scope.yaml",
         policy_path=REPO_ROOT / "policy.yaml",
         db_path=tmp_path / "facts.db",
+        measure_repo="apache/superset",
         dry_run=True,
         allow_upstream_write=False,
     )

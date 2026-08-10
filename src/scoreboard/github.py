@@ -17,7 +17,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from .models import Event, EventType, Severity, digest_payload
+from .models import Event, EventType, Severity, WorkflowRunRef, digest_payload
 
 UPSTREAM_REPOS = frozenset({"apache/superset"})
 
@@ -164,6 +164,74 @@ class HttpGitHubClient:
                 )
             )
         return facts
+
+    def list_pull_request_runs(
+        self, repo: str, since: datetime, until: datetime
+    ) -> list[WorkflowRunRef]:
+        """Workflow runs triggered by pull requests in a window, newest first.
+
+        `event=pull_request` is asked of the API rather than filtered here, because a repository
+        the size of Superset runs scheduled and push workflows whose minutes are not attributable
+        to any pull request and would inflate the per-PR figure.
+        """
+        params: dict[str, Any] = {
+            "event": "pull_request",
+            "created": f"{since.date().isoformat()}..{until.date().isoformat()}",
+        }
+        runs: list[WorkflowRunRef] = []
+        for run in self._paginate_key(f"/repos/{repo}/actions/runs", params, "workflow_runs"):
+            pulls = run.get("pull_requests") or []
+            number = int(pulls[0].get("number")) if pulls else None
+            runs.append(
+                WorkflowRunRef(
+                    run_id=int(run.get("id") or 0),
+                    pr_number=number,
+                    head_sha=str(run.get("head_sha") or ""),
+                )
+            )
+        return runs
+
+    def pull_request_for_sha(self, repo: str, sha: str) -> int | None:
+        """The pull request a commit belongs to, for runs the Actions API cannot attribute.
+
+        `workflow_runs[].pull_requests` is populated only when the head branch lives in the same
+        repository, so on a project whose contributions arrive from forks it is empty for almost
+        every run. Attributing minutes by head commit instead is what makes a cost-per-pull-request
+        figure describe the project rather than the handful of branches pushed by committers.
+        """
+        response = self._client.get(f"/repos/{repo}/commits/{sha}/pulls", params={"per_page": 1})
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        pulls = response.json()
+        if not isinstance(pulls, list) or not pulls:
+            return None
+        first = pulls[0]
+        number = first.get("number") if isinstance(first, dict) else None
+        return int(number) if number is not None else None
+
+    def get_run_jobs(self, repo: str, run_id: int) -> str:
+        response = self._client.get(
+            f"/repos/{repo}/actions/runs/{run_id}/jobs", params={"per_page": 100}
+        )
+        response.raise_for_status()
+        return response.text
+
+    def _paginate_key(
+        self, path: str, params: dict[str, Any], key: str
+    ) -> Iterator[dict[str, Any]]:
+        """Pagination for the Actions endpoints, which wrap their list in an envelope."""
+        page = 1
+        while True:
+            response = self._client.get(path, params={**params, "per_page": 100, "page": page})
+            response.raise_for_status()
+            batch = response.json().get(key) or []
+            if not batch:
+                return
+            yield from batch
+            if len(batch) < 100:
+                return
+            page += 1
 
     def get_pull_request_body(self, repo: str, number: int) -> str:
         response = self._client.get(f"/repos/{repo}/pulls/{number}")

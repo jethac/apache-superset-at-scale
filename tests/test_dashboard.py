@@ -8,9 +8,10 @@ only: stubbing them in `src` would leave a module that silently answers with inv
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi import FastAPI
@@ -22,10 +23,14 @@ from scoreboard.dashboard import (
     build_router,
     ci_cost_payload,
     dashboard_payload,
+    debt_comparable_payload,
     debt_payload,
+    fleet_payload,
     flow_payload,
     funnel_payload,
     outbox_payload,
+    thesis_payload,
+    throughput_payload,
 )
 from scoreboard.devin import FakeDevinClient
 from scoreboard.models import TaskState
@@ -155,6 +160,27 @@ def test_debt_payload_never_infers_comparability_from_the_ruleset_id() -> None:
     assert payload[1]["ruleset_change"] == "counting method changed"
 
 
+def test_the_comparable_series_holds_the_rule_set_fixed_across_every_run() -> None:
+    """Totals over the shared rules are smaller than the headline count, and that is the point."""
+    comparable = debt_comparable_payload(
+        debt_payload(FactStore(":memory:"), REPO, fake_debt_series)
+    )
+
+    assert [entry["total"] for entry in comparable] == [400, 350, 92]
+    assert {entry["rules"] for entry in comparable} == {1}
+
+
+def test_a_rule_no_run_shares_leaves_nothing_to_compare() -> None:
+    """Counting a rule as zero where it was never measured would invent a fall in debt."""
+    points = [
+        FakeDebtPoint(DAY, REPO, "a", 10, {"eqeqeq": 10}, True, ""),
+        FakeDebtPoint(DAY + timedelta(days=1), REPO, "b", 4, {"no-console": 4}, False, "swapped"),
+    ]
+    payload = debt_payload(FactStore(":memory:"), REPO, series=lambda store, repo: points)
+
+    assert debt_comparable_payload(payload) == []
+
+
 def test_ci_cost_payload_rounds_and_keeps_the_workflow_breakdown() -> None:
     payload = ci_cost_payload(FactStore(":memory:"), REPO, series=fake_cost_series)
 
@@ -188,6 +214,103 @@ def test_flow_and_funnel_payloads_come_from_the_fact_store(
     )
 
 
+def test_the_fleet_keeps_finished_sessions_and_puts_running_ones_first(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """A reviewer arrives after the run, so a roster of only in-flight work would read as empty."""
+    seed(store, scope)
+
+    sessions = fleet_payload(store)
+
+    assert sessions
+    assert all(session["session_id"] for session in sessions)
+    running = [index for index, s in enumerate(sessions) if s["running"]]
+    finished = [index for index, s in enumerate(sessions) if not s["running"]]
+    assert not (running and finished) or max(running) < min(finished)
+    assert any(not session["running"] for session in sessions)
+    for session in sessions:
+        assert session["session_url"].startswith("https://app.devin.ai/sessions/")
+        assert "devin-" not in session["session_url"]
+
+
+def test_throughput_excludes_running_sessions_from_the_delivery_rate(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """A session still running is not evidence of failure, so it cannot sit in the denominator."""
+    seed(store, scope)
+
+    throughput = throughput_payload(store, REPO, cost_series=fake_cost_series)
+    delivered = int(cast(int, throughput["delivered"]))
+    settled = (
+        delivered + int(cast(int, throughput["escalated"])) + int(cast(int, throughput["errored"]))
+    )
+    daily = cast(list[dict[str, int]], throughput["daily"])
+
+    assert throughput["sessions_started"] == settled + int(cast(int, throughput["in_flight"]))
+    assert throughput["delivery_rate"] == pytest.approx(delivered / settled, abs=1e-3)
+    assert sum(day["started"] for day in daily) == throughput["sessions_started"]
+
+
+def test_the_debt_claim_never_compares_across_a_ruleset_change(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """The last point is not comparable to its predecessor, so raw totals must not be subtracted.
+
+    677 to 92 would be the headline arithmetic and it is meaningless: two rules left the tracker
+    between them. The claim falls back to the one rule every run measured, and says so.
+    """
+    seed(store, scope)
+    throughput = throughput_payload(store, REPO, cost_series=fake_cost_series)
+
+    debt, cost, shipped = thesis_payload(
+        store, REPO, throughput, debt_series=fake_debt_series, cost_series=fake_cost_series
+    )
+
+    assert debt["from"] == 400
+    assert debt["value"] == 92
+    assert debt["status"] == "improving"
+    assert "1 rules measured by all 3 runs" in str(debt["detail"])
+    assert "677" not in str(debt["detail"])
+    assert cost["status"] == "improving"
+    assert shipped["unit"] == "issues shipped"
+
+
+def test_the_cost_claim_ignores_a_period_holding_a_single_pull_request(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """One PR in a week is that PR's cost, not the week's, and a heavy one fakes a saving."""
+
+    def thin_then_real(store: FactStore, repo: str, period: str = "week") -> list[FakeCostPoint]:
+        return [replace(COST_POINTS[0], prs=1, median_minutes_per_pr=48.5), COST_POINTS[1]]
+
+    seed(store, scope)
+    throughput = throughput_payload(store, REPO, cost_series=thin_then_real)
+
+    _, cost, _ = thesis_payload(
+        store, REPO, throughput, debt_series=fake_debt_series, cost_series=thin_then_real
+    )
+
+    assert cost["status"] == "not yet comparable"
+    assert "48.5" not in str(cost["detail"])
+
+
+def test_a_claim_with_no_measurements_reads_as_unproven_rather_than_achieved() -> None:
+    def no_debt(store: FactStore, repo: str) -> list[FakeDebtPoint]:
+        return []
+
+    def no_cost(store: FactStore, repo: str, period: str = "week") -> list[FakeCostPoint]:
+        return []
+
+    store = FactStore(":memory:")
+    throughput = throughput_payload(store, REPO, cost_series=no_cost)
+
+    claims = thesis_payload(store, REPO, throughput, debt_series=no_debt, cost_series=no_cost)
+
+    assert [claim["status"] for claim in claims] == ["no data", "no data", "no data"]
+    assert throughput["delivery_rate"] is None
+    assert throughput["acus_per_delivered_pr"] is None
+
+
 def test_outbox_payload_links_every_row_to_its_pull_request(
     store: FactStore, scope: ScopeConfig
 ) -> None:
@@ -211,7 +334,18 @@ def test_dashboard_payload_has_every_section(store: FactStore, scope: ScopeConfi
     payload = dashboard_payload(
         store, REPO, debt_series=fake_debt_series, cost_series=fake_cost_series
     )
-    assert {"repo", "debt", "ci_cost", "flow", "funnel", "outbox"} <= set(payload)
+    assert {
+        "repo",
+        "generated_at",
+        "thesis",
+        "throughput",
+        "debt",
+        "ci_cost",
+        "flow",
+        "fleet",
+        "funnel",
+        "outbox",
+    } <= set(payload)
 
 
 def test_router_serves_the_page_and_one_data_document(
@@ -253,3 +387,46 @@ def test_page_loads_no_third_party_script_or_stylesheet() -> None:
     assert [source for source in sources if source.startswith(("http://", "https://", "//"))] == []
     assert "@import" not in html
     assert "cdn" not in html.lower()
+
+
+def test_dispatch_graph_branches_one_edge_per_session(store: FactStore, scope: ScopeConfig) -> None:
+    """Fan-out has to survive as structure: a session cannot be aggregated into a day's total."""
+    seed(store, scope)
+
+    graph = cast(dict[str, list[dict[str, object]]], dashboard.dispatch_graph_payload(store))
+    sessions = [node for node in graph["nodes"] if node["kind"] == "session"]
+    bursts = [node for node in graph["nodes"] if node["kind"] == "dispatch"]
+    outcomes = [node for node in graph["nodes"] if node["kind"] == "outcome"]
+
+    assert sessions and bursts and outcomes
+    assert len({node["id"] for node in graph["nodes"]}) == len(graph["nodes"])
+    assert len(graph["edges"]) == 2 * len(sessions)
+    assert sum(cast(int, node["count"]) for node in bursts) == len(sessions)
+    assert sum(cast(int, node["count"]) for node in outcomes) == len(sessions)
+    ids = {node["id"] for node in graph["nodes"]}
+    assert all({edge["source"], edge["target"]} <= ids for edge in graph["edges"])
+    for node in sessions:
+        assert cast(str, node["session_url"]).startswith("https://app.devin.ai/sessions/")
+
+
+def test_debt_and_ci_are_read_from_the_measured_repo_not_the_write_target(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """Sessions land on the fork; debt and CI minutes describe the project the fork came from."""
+    seen: list[str] = []
+
+    def recording_debt_series(store: FactStore, repo: str) -> list[FakeDebtPoint]:
+        seen.append(repo)
+        return DEBT_POINTS
+
+    payload = dashboard_payload(
+        store,
+        REPO,
+        debt_series=recording_debt_series,
+        cost_series=fake_cost_series,
+        measure_repo="apache/superset",
+    )
+
+    assert payload["repo"] == REPO
+    assert payload["measure_repo"] == "apache/superset"
+    assert set(seen) == {"apache/superset"}

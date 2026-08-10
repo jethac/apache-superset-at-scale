@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS fact_task (
     pr_is_draft    INTEGER NOT NULL DEFAULT 0,
     policy_profile TEXT,
     acus_consumed  REAL,
+    dedupe_hits    INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
@@ -113,7 +114,35 @@ class FactStore:
         self._lock = threading.Lock()
         with self._lock:
             self._connection.executescript(SCHEMA)
+            self._migrate()
             self._connection.commit()
+
+    def _migrate(self) -> None:
+        """Additive column adds, and repairs, for stores created by an earlier schema."""
+        columns = {
+            str(row["name"]) for row in self._connection.execute("PRAGMA table_info(fact_task)")
+        }
+        if "dedupe_hits" not in columns:
+            self._connection.execute(
+                "ALTER TABLE fact_task ADD COLUMN dedupe_hits INTEGER NOT NULL DEFAULT 0"
+            )
+        self._repair_mislabelled_dedupes()
+
+    def _repair_mislabelled_dedupes(self) -> None:
+        """Restore the verdict on rows an earlier intake overwrote with `deduped`.
+
+        Intake once wrote a `deduped` task every time it saw an issue it had already seen, which
+        buried the original verdict: an out-of-scope issue re-read on ninety-six polls ended up
+        indistinguishable from a genuine duplicate, and the funnel read as if the fleet spent its
+        time deduplicating. Re-sightings are counted in `dedupe_hits` instead, so a stored
+        `deduped` state with no re-sightings and no session can only be that overwrite, and the
+        row's own admission decision says what it should have been.
+        """
+        self._connection.execute(
+            "UPDATE fact_task SET state = ?"
+            " WHERE state = ? AND dedupe_hits = 0 AND session_id IS NULL AND admitted = 0",
+            (TaskState.FILTERED.value, TaskState.DEDUPED.value),
+        )
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
@@ -181,6 +210,19 @@ class FactStore:
                     task.created_at.isoformat(),
                     task.updated_at.isoformat(),
                 ),
+            )
+
+    def record_duplicate_sighting(self, task_id: str) -> None:
+        """Count a re-sighting without touching the task it duplicates.
+
+        Intake sees the same open issue on every poll. Writing a `deduped` task for each one would
+        overwrite the state of work already in flight, so a session started an hour ago would read
+        as deduped intake — the roster and the funnel would then disagree with the Devin app. The
+        sighting is a property of intake volume, so it is counted as one.
+        """
+        with self._tx() as connection:
+            connection.execute(
+                "UPDATE fact_task SET dedupe_hits = dedupe_hits + 1 WHERE task_id = ?", (task_id,)
             )
 
     def task_exists(self, task_id: str) -> bool:
@@ -313,13 +355,17 @@ class FactStore:
 
         A session that is still working is not a failure and not a delivery; it is a row the
         poller has to come back to, which is why the funnel keeps `in_flight` as its own bucket.
+
+        A `deduped` row that owns a session is picked up too. Deduping is a decision made before a
+        session exists, so the combination can only be a row an earlier duplicate sighting wrote
+        over; leaving it out would strand real, running work outside the poller for good.
         """
         with self._lock:
             return list(
                 self._connection.execute(
                     "SELECT task_id, session_id, target_repo, policy_profile FROM fact_task"
-                    " WHERE session_id IS NOT NULL AND state = ?",
-                    (TaskState.SESSION_STARTED.value,),
+                    " WHERE session_id IS NOT NULL AND state IN (?, ?)",
+                    (TaskState.SESSION_STARTED.value, TaskState.DEDUPED.value),
                 ).fetchall()
             )
 

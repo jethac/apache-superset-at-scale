@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from statistics import median
 from typing import Literal, Protocol
 
+from .models import WorkflowRunRef
 from .store import FactStore
 
 SCHEMA = """
@@ -58,9 +59,15 @@ class JobRun:
 
     @property
     def minutes(self) -> float:
-        """Billable wall time. GitHub bills the job's elapsed time, so queueing is excluded."""
+        """Billable wall time. GitHub bills the job's elapsed time, so queueing is excluded.
+
+        A job that never ran — skipped by a conditional, or cancelled before it started — is
+        sometimes stamped with a `completed_at` fractionally before its `started_at`. Those
+        negatives are floored at zero rather than summed: a gate job that did no work bought no
+        minutes, and left signed it would quietly refund the workflows around it.
+        """
         elapsed = (self.completed_at - self.started_at).total_seconds() / 60.0
-        return round(elapsed, 1)
+        return round(max(elapsed, 0.0), 1)
 
 
 @dataclass(frozen=True)
@@ -80,15 +87,6 @@ class CostPoint:
     by_workflow: list[WorkflowCost]
 
 
-@dataclass(frozen=True)
-class WorkflowRunRef:
-    """The part of a workflow run needed to attribute its jobs to a pull request."""
-
-    run_id: int
-    pr_number: int | None
-    head_sha: str
-
-
 class WorkflowRunSource(Protocol):
     """Exactly the two GitHub reads collection needs, so tests can inject a fake.
 
@@ -101,6 +99,8 @@ class WorkflowRunSource(Protocol):
     ) -> list[WorkflowRunRef]: ...
 
     def get_run_jobs(self, repo: str, run_id: int) -> str: ...
+
+    def pull_request_for_sha(self, repo: str, sha: str) -> int | None: ...
 
 
 def ensure_schema(store: FactStore) -> None:
@@ -210,19 +210,39 @@ def record_jobs(store: FactStore, jobs: Sequence[JobRun]) -> None:
 
 
 def collect(
-    github: WorkflowRunSource, store: FactStore, repo: str, since: datetime, until: datetime
+    github: WorkflowRunSource,
+    store: FactStore,
+    repo: str,
+    since: datetime,
+    until: datetime,
+    max_runs: int | None = None,
 ) -> int:
     """Record the jobs of every pull-request workflow run in a window; return rows written.
 
     The pull request number comes from the run, not from the jobs payload, which does not carry
-    it. Runs GitHub cannot attribute to a pull request are still recorded, with a null number, so
-    the table stays a faithful account of what the runners did.
+    it. Where the run does not name one — the Actions API leaves `pull_requests` empty whenever the
+    head branch lives in a fork, which on Superset is nearly every contribution — the head commit
+    is asked which pull request it belongs to. Without that second read the median would describe
+    only the handful of pull requests pushed by committers. Runs neither read can attribute are
+    still recorded, with a null number, so the table stays a faithful account of what the runners
+    did.
+
+    `max_runs` bounds the walk for repositories that run thousands of jobs a day: each run costs
+    an API call, and the figure this feeds is a median, which a bounded sample of the window
+    estimates without reading every run.
     """
     ensure_schema(store)
     written = 0
-    for run in github.list_pull_request_runs(repo, since, until):
+    runs = github.list_pull_request_runs(repo, since, until)
+    resolved: dict[str, int | None] = {}
+    for run in runs[:max_runs] if max_runs else runs:
+        pr_number = run.pr_number
+        if pr_number is None and run.head_sha:
+            if run.head_sha not in resolved:
+                resolved[run.head_sha] = github.pull_request_for_sha(repo, run.head_sha)
+            pr_number = resolved[run.head_sha]
         jobs = [
-            replace(job, pr_number=run.pr_number, head_sha=job.head_sha or run.head_sha)
+            replace(job, pr_number=pr_number, head_sha=job.head_sha or run.head_sha)
             for job in parse_jobs(github.get_run_jobs(repo, run.run_id), repo)
         ]
         if not jobs:

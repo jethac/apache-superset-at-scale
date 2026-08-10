@@ -22,6 +22,8 @@ from pathlib import Path
 import httpx
 import yaml
 
+from .devin import HttpDevinClient
+
 DEVIN_SETTINGS_URL = "https://app.devin.ai/settings/integrations"
 ENV_PATH = Path(".env")
 
@@ -30,6 +32,8 @@ ENV_PATH = Path(".env")
 class CheckResult:
     ok: bool
     detail: str
+    blocking: bool = True
+    """Whether a failure should stop a live run, as opposed to being unverifiable here."""
 
 
 def _prompt_secret(label: str, existing: str | None) -> str:
@@ -72,15 +76,51 @@ def check_repo_readable(
     return CheckResult(True, f"{repo} readable")
 
 
+def check_devin_token(api_key: str, base_url: str = "https://api.devin.ai") -> CheckResult:
+    """Check the Devin key on its own, before anything that also depends on the org id.
+
+    Two credentials are pasted into masked prompts one after the other, so the
+    interesting failure is not an invalid key but the *wrong* key: paste the GitHub
+    token twice and every Devin call returns 403, which reads like an org-id problem
+    and sends you looking in the wrong settings page.
+    """
+    if api_key.startswith(("github_pat_", "ghp_", "gho_", "ghs_")):
+        return CheckResult(False, "that is a GitHub token, not a Devin API key")
+    try:
+        response = httpx.get(
+            f"{base_url}/v1/sessions",
+            params={"limit": 1},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15.0,
+        )
+    except httpx.HTTPError as error:
+        return CheckResult(False, f"could not reach the Devin API: {error}")
+    if response.status_code in {401, 403}:
+        return CheckResult(False, f"Devin rejected the key (HTTP {response.status_code})")
+    if response.status_code >= 400:
+        return CheckResult(False, f"unexpected response from Devin (HTTP {response.status_code})")
+    return CheckResult(True, "API key accepted")
+
+
 def check_devin_repo_access(
     api_key: str, org_id: str, repo: str, base_url: str = "https://api.devin.ai"
 ) -> CheckResult:
     """Verify Devin's git integration can see the repository sessions will work in."""
-    from .devin import HttpDevinClient
-
     client = HttpDevinClient(api_key, base_url, org_id=org_id)
     try:
         repositories = client.list_repositories()
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 403:
+            # The organisation endpoint wants an organisation-scoped key. A user key can
+            # create sessions perfectly well but cannot enumerate the org's repositories,
+            # so the absence of an answer here says nothing about whether Devin can clone.
+            return CheckResult(
+                False,
+                "repository listing needs an organisation-scoped key; "
+                f"confirm access manually at {DEVIN_SETTINGS_URL}",
+                blocking=False,
+            )
+        return CheckResult(False, f"could not list Devin repositories: {error}")
     except (httpx.HTTPError, ValueError) as error:
         return CheckResult(False, f"could not list Devin repositories: {error}")
     finally:
@@ -116,13 +156,21 @@ def write_env(values: dict[str, str], path: Path = ENV_PATH) -> None:
 
 
 def write_scope(target_repo: str, intake_repos: list[str], path: Path) -> None:
-    """Rewrite only the repo-selection parts of an existing scope file, preserving the rules."""
-    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    """Rewrite only the repo-selection parts of an existing scope file, preserving the rules.
+
+    A round trip through the YAML loader drops the comments, and the comments are
+    where the reasoning behind each rule lives. Accepting the defaults is the common
+    path, so the file is left untouched unless the answers actually change it.
+    """
+    original = path.read_text(encoding="utf-8")
+    document = yaml.safe_load(original)
     document["defaults"]["target_repo"] = target_repo
     for rule in document.get("rules", []):
         repos = rule.get("when", {}).get("repo")
         if repos:
             rule["when"]["repo"] = [repo for repo in repos if repo in intake_repos] or repos
+    if document == yaml.safe_load(original):
+        return
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
 
@@ -136,6 +184,10 @@ def run_wizard(scope_path: Path = Path("scope.yaml")) -> int:
         return 1
 
     devin_key = _prompt_secret("DEVIN_API_KEY", os.environ.get("DEVIN_API_KEY"))
+    devin_token_check = check_devin_token(devin_key) if devin_key else CheckResult(False, "not set")
+    print(f"  devin: {devin_token_check.detail}")
+    if not devin_token_check.ok:
+        return 1
     devin_org = input(
         f"DEVIN_ORG_ID [{os.environ.get('DEVIN_ORG_ID', '')}]: "
     ).strip() or os.environ.get("DEVIN_ORG_ID", "")
@@ -157,12 +209,12 @@ def run_wizard(scope_path: Path = Path("scope.yaml")) -> int:
         print(f"  github: {check.detail}")
         failures += 0 if check.ok else 1
 
-    if devin_key and devin_org:
+    if devin_org:
         access = check_devin_repo_access(devin_key, devin_org, target_repo)
         print(f"  devin: {access.detail}")
-        failures += 0 if access.ok else 1
+        failures += 0 if access.ok or not access.blocking else 1
     else:
-        print("  devin: skipped repository access check (needs both API key and org id)")
+        print("  devin: skipped repository access check (needs an org id)")
 
     write_env(
         {

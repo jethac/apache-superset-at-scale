@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: fde-scoreboard:local
+    image: scoreboard:local
     # Credentials are read from a local .env that is never committed or baked
     # into the image. `scoreboard init` writes it with 0600 permissions.
     env_file:
@@ -40,7 +40,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: fde-scoreboard:local
+    image: scoreboard:local
     profiles: ["live"]
     env_file:
       - path: .env
@@ -74,7 +74,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: fde-scoreboard:local
+    image: scoreboard:local
     profiles: ["demo"]
     environment:
       DB_PATH: /data/facts.db

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>FDE deployment scoreboard</title>
+<title>Devin @ apache/superset</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/dashboard/lozenge.min.css">
 <style>
@@ -22,6 +22,9 @@
   .tick { color: var(--lz-sys-text-subtlest); fill: currentColor; font-size: 13px; }
   .lbl { color: var(--lz-sys-text-subtle); fill: currentColor; font-size: 13px; }
   .line { color: var(--lz-sys-accent-bold); fill: none; stroke: currentColor; stroke-width: 3; }
+  .fixedline { color: var(--lz-sys-accent-bold); fill: none; stroke: currentColor; stroke-width: 2;
+               stroke-dasharray: 6 4; opacity: 0.75; }
+  .fixeddot { color: var(--lz-sys-accent-bold); fill: var(--lz-sys-surface); stroke: currentColor; stroke-width: 2; }
   .dot { color: var(--lz-sys-accent-bold); fill: currentColor; }
   .break { color: var(--lz-sys-danger-bold); stroke: currentColor; stroke-width: 2; stroke-dasharray: 5 4; }
   .breakmark { color: var(--lz-sys-danger-bold); fill: currentColor; }
@@ -56,16 +59,52 @@
     z-index: 10;
   }
   .err { color: var(--lz-sys-status-danger-subtle-text); }
+  .now { color: var(--lz-sys-text-subtle); stroke: currentColor; stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .nowtext { color: var(--lz-sys-text-subtle); fill: currentColor; font-size: 12px; }
+  .panel[hidden] { display: none; }
+  .provenance { font-size: 13px; color: var(--lz-sys-text-subtle); margin: 10px 0 0; }
+  .asof { font-variant-numeric: tabular-nums; }
+  .live { color: var(--lz-sys-success-bold); }
+  .thesis { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin: 0 0 20px; }
+  .claim .card-body { display: flex; flex-direction: column; gap: 6px; }
+  .claim .value { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .claim .unit { font-size: 13px; color: var(--lz-sys-text-subtle); }
+  .claim .detail { font-size: 13px; margin: 0; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 0 0 12px; }
+  .metric { border: 1px solid var(--lz-sys-border-subtle); border-radius: 8px; padding: 10px 12px; }
+  .metric b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .metric span { font-size: 12px; color: var(--lz-sys-text-subtle); }
+  .bar { color: var(--lz-sys-accent-blue-bold); fill: currentColor; }
+  .bardone { color: var(--lz-sys-success-bold); fill: currentColor; }
+  /* Dispatch DAG. Edges are painted by the outcome they lead to, so a burst that produced one PR
+     and three escalations reads as such before any label is examined. */
+  .dagbox { color: var(--lz-sys-border); stroke: currentColor; fill: var(--lz-sys-surface-raised); stroke-width: 1; }
+  .dagtext { color: var(--lz-sys-text); fill: currentColor; font-size: 12px; }
+  .dagsub { color: var(--lz-sys-text-subtlest); fill: currentColor; font-size: 11px; }
+  .dagedge { fill: none; stroke: currentColor; stroke-width: 2; opacity: 0.75; }
+  .dagedge.dispatch { color: var(--lz-sys-accent-blue-bold); }
+  .dagedge.delivered { color: var(--lz-sys-success-bold); }
+  .dagedge.running { color: var(--lz-sys-accent-blue-bold); stroke-dasharray: 5 4; }
+  .dagedge.escalated { color: var(--lz-sys-warning-bold); }
+  .dagedge.errored { color: var(--lz-sys-danger-bold); }
+  .dagbox.delivered { color: var(--lz-sys-success-bold); stroke-width: 2; }
+  .dagbox.running { color: var(--lz-sys-accent-blue-bold); stroke-width: 2; stroke-dasharray: 5 4; }
+  .dagbox.escalated { color: var(--lz-sys-warning-bold); stroke-width: 2; }
+  .dagbox.errored { color: var(--lz-sys-danger-bold); stroke-width: 2; }
 </style>
 </head>
 <body>
 <nav class="navbar">
-  <a class="navbar-brand" href="/dashboard">FDE deployment scoreboard</a>
-  <ul class="navbar-nav">
-    <li><a class="nav-link active" href="/dashboard" aria-current="page">Scoreboard</a></li>
+  <a class="navbar-brand" href="/dashboard">Devin @ apache/superset</a>
+  <ul class="navbar-nav" id="tabs">
+    <li><a class="nav-link active" href="#trends" data-panel="trends" aria-current="page">Trends</a></li>
+    <li><a class="nav-link" href="#flow" data-panel="flow">Where the work is going</a></li>
+    <li><a class="nav-link" href="#fleet" data-panel="fleet">Fleet</a></li>
+    <li><a class="nav-link" href="#funnel" data-panel="funnel">Funnel</a></li>
     <li><a class="nav-link" href="/dashboard/data">Raw facts</a></li>
   </ul>
   <div class="navbar-actions">
+    <span class="lozenge lozenge-inprogress" id="fleetpill">Fleet</span>
     <span class="lozenge lozenge-inprogress" id="outboxpill">Outbox</span>
     <button class="btn btn-subtle" id="scheme" type="button">Dark</button>
   </div>
@@ -74,11 +113,26 @@
 <main>
 <p class="sub" id="subtitle">Loading…</p>
 
+<section class="thesis" id="thesis"></section>
+<p class="provenance" style="margin-top:-12px">
+  The thesis, in three claims: debt down, CI compute per pull request down, more issues shipped —
+  and every tab below is the evidence for one of them. A claim with nothing behind it reads
+  <em>no data</em> rather than quietly showing a zero.
+</p>
+
+<div class="panel" id="panel-trends">
 <section class="row">
   <div class="card">
     <div class="card-header">Technical debt over time</div>
     <div class="card-body">
       <svg id="debt" viewBox="0 0 640 300" role="img" aria-label="Technical debt over time"></svg>
+      <p class="legend" id="debtlegend"></p>
+      <p class="provenance">
+        Every point is Superset's <em>own</em> measurement — <code>oxlint</code> run against the
+        rules in the project's <code>oxlint.json</code>, by the project's own
+        <code>tech-debt.yml</code> workflow. Nothing here is our estimate of the codebase, and no
+        point is produced by the agent whose changes it scores.
+      </p>
       <div class="message message-warning">
         <div class="message-title">The instrument, not just the metric</div>
         <p>
@@ -92,39 +146,130 @@
     </div>
   </div>
   <div class="card">
-    <div class="card-header">CI compute-minutes per pull request</div>
+    <div class="card-header">CI compute-minutes per pull request <span class="lozenge lozenge-danger">P0</span></div>
     <div class="card-body">
       <svg id="cicost" viewBox="0 0 640 300" role="img" aria-label="CI minutes per pull request"></svg>
       <p class="legend" id="cilegend"></p>
+      <div class="message message-danger">
+        <div class="message-title">Why this is the P0, and not the debt line</div>
+        <p>
+          A fleet's output is measured in pull requests, and this is the price of one. Every change
+          the automation files pays this bill again, so it multiplies by exactly the thing we are
+          trying to increase: at the current median, ten open pull requests hold roughly
+          <strong id="cip0">—</strong> of compute, before a single rerun. Bringing the number down
+          is what makes filing more work affordable, which is why it leads the roadmap rather than
+          the violation count.
+        </p>
+        <p>
+          Minutes are billed job-duration summed per pull request, read from the Actions API on the
+          repository under measurement — not from any timing the agent reports about itself.
+        </p>
+      </div>
     </div>
   </div>
-</section>
-
-<section class="card">
-  <div class="card-header">Where the work went</div>
-  <div class="card-body">
-    <svg id="sankey" viewBox="0 0 1280 460" role="img" aria-label="Flow of tasks from intake to outcome"></svg>
-    <p class="legend" id="streams"></p>
-  </div>
-</section>
-
-<section>
-  <h2 class="h500">Funnel</h2>
-  <div class="funnel" id="funnel"></div>
 </section>
 
 <section class="card">
   <div class="card-header">Authorship outbox <span class="badge" id="outboxcount">0</span></div>
   <div class="card-body">
     <p class="legend">Draft pull requests waiting on a human paragraph. Oldest first.</p>
+    <div class="message message-info">
+      <div class="message-title">Why a finished pull request sits here instead of shipping</div>
+      <p>
+        Apache's
+        <a href="https://www.apache.org/legal/generative-tooling.html">generative tooling policy</a>
+        makes a human contributor accountable for what they submit, and Superset's
+        <a href="https://github.com/apache/superset/wiki/New-Contributor-Welcome-&amp;-Expectations">contributor
+        expectations</a> are enforced socially on top of it: a pull request that reads as entirely
+        machine-written gets closed. So for any repository on the <code>asf-superset</code> profile
+        in <code>policy.yaml</code>, the session opens a <strong>draft</strong> — a draft asks for
+        no reviewer's attention — records which rules the submission fails, and takes the next task.
+        The draft goes ready only when a human has written the paragraph, which the app takes
+        <em>verbatim</em>; there is no facility here for generating or improving that text, because
+        the rule being implemented is that a human wrote it.
+      </p>
+      <p>
+        This queue is therefore the operator's latency, not the fleet's, and it is deliberately
+        measured: the age of a row is how long a human took, and those hours are excluded from
+        delivery timing rather than charged to the agent.
+      </p>
+    </div>
     <table class="table table-hover" id="outbox">
       <thead>
-        <tr><th>Task</th><th>Pull request</th><th class="num">Waiting (days)</th></tr>
+        <tr><th>Task</th><th>Pull request</th><th>Blocked by</th><th class="num">Waiting (days)</th></tr>
       </thead>
       <tbody></tbody>
     </table>
   </div>
 </section>
+</div>
+
+<div class="panel" id="panel-flow" hidden>
+<section class="card">
+  <div class="card-header">This is where the work is going <span class="asof" id="flowasof"></span></div>
+  <div class="card-body">
+    <svg id="sankey" viewBox="0 0 1280 460" role="img" aria-label="Flow of tasks from intake to outcome"></svg>
+    <p class="legend" id="streams"></p>
+    <p class="provenance">
+      Present tense on purpose: this is a live position, not a retrospective. Ribbon widths are task
+      counts as of the timestamp above, and <em>In flight</em> is work the fleet is doing right now —
+      it will move to an outcome while you watch. Flow is conserved, so every task that entered
+      leaves through exactly one ribbon and losses are named nodes rather than missing ink.
+    </p>
+  </div>
+</section>
+</div>
+
+<div class="panel" id="panel-fleet" hidden>
+<section class="card">
+  <div class="card-header">Dispatches and deliveries <span class="asof" id="dispatchasof"></span></div>
+  <div class="card-body">
+    <div class="metrics" id="throughput"></div>
+    <svg id="dispatch" viewBox="0 0 1280 300" role="img" aria-label="Directed graph of dispatch bursts, the Devin sessions they started, and each session's outcome"></svg>
+    <p class="provenance">
+      Left to right: a dispatch burst, one edge per Devin session it started, and what became of
+      that session. Fan-out is a branch rather than a taller bar, so a burst that produced one
+      pull request and three escalations reads as exactly that; edges are coloured by outcome and
+      each session box links to its transcript in the Devin app. Delivery rate counts only settled
+      sessions, so a running session is never scored as a failure.
+    </p>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-header">Devin fleet <span class="asof" id="fleetasof"></span></div>
+  <div class="card-body">
+    <p class="legend">
+      Every session this deployment has started, running first, then finished ones with their
+      outcome. Session ids come back from <code>api.devin.ai</code> at creation; each links to its
+      transcript.
+    </p>
+    <table class="table table-hover" id="fleet">
+      <thead>
+        <tr>
+          <th>Session</th><th>Issue</th><th>Stream</th><th>State</th><th>Pull request</th>
+          <th class="num">ACUs</th><th>Started</th><th>Last change</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+</div>
+
+<div class="panel" id="panel-funnel" hidden>
+<section class="card">
+  <div class="card-header">Funnel <span class="asof" id="funnelasof"></span></div>
+  <div class="card-body">
+    <p class="legend">
+      Counts of every event the automation has seen, by where it ended up. Filtered and deduped are
+      first-class outcomes: most intake is correctly refused, and a funnel that hides its refusals
+      cannot show that the scope rules work.
+    </p>
+    <div class="funnel" id="funnel"></div>
+  </div>
+</section>
+</div>
 </main>
 
 <div id="tip"></div>
@@ -172,6 +317,29 @@ function shortDate(iso) {
   return String(iso).slice(0, 10);
 }
 
+function stamp(iso) {
+  return String(iso).slice(0, 16).replace("T", " ") + " UTC";
+}
+
+function ago(iso, now) {
+  var minutes = Math.max(0, Math.round((now - new Date(iso)) / 60000));
+  if (minutes < 60) { return minutes + "m ago"; }
+  if (minutes < 60 * 48) { return Math.round(minutes / 60) + "h ago"; }
+  return Math.round(minutes / 1440) + "d ago";
+}
+
+/* Every time series ends at its last measurement, which is not the same instant as the page load.
+   Without a marker for the present the eye reads the right-hand end as "now", so a series that
+   stopped updating a fortnight ago looks current. The gap is drawn rather than described. */
+function drawNow(parts, x, top, height, bottom, lastIso, now) {
+  parts.push('<line class="now" x1="' + x + '" y1="' + top + '" x2="' + x + '" y2="' + (height - bottom) + '"/>');
+  parts.push('<text class="nowtext" x="' + (x + 5) + '" y="' + (top + 12) + '">now</text>');
+  if (lastIso) {
+    parts.push('<text class="nowtext" x="' + (x + 5) + '" y="' + (top + 27) + '">' +
+      esc(ago(lastIso, now)) + '</text>');
+  }
+}
+
 function scale(values, height, top, bottom) {
   var max = 0;
   for (var i = 0; i < values.length; i += 1) {
@@ -209,12 +377,16 @@ function empty(target, message) {
 }
 
 /* Debt: one polyline per comparable run. A point that is not comparable to its predecessor
-   starts a new run, and the gap between the runs is marked and labelled. */
-function drawDebt(points) {
+   starts a new run, and the gap between the runs is marked and labelled.
+
+   The dashed line is the same measurements restricted to the rules every run measured, which is
+   the only series that can be read end to end. It sits below the solid one because it counts
+   fewer rules, not because debt is lower than reported. */
+function drawDebt(points, comparable, now) {
   var target = document.getElementById("debt");
   if (!points.length) { empty(target, "No debt measurements yet."); return; }
 
-  var width = 640, height = 300, left = 56, right = 16, top = 34, bottom = 46;
+  var width = 640, height = 300, left = 56, right = 74, top = 34, bottom = 46;
   var totals = points.map(function (p) { return p.total; });
   var sc = scale(totals, height, top, bottom);
   var step = points.length > 1 ? (width - left - right) / (points.length - 1) : 0;
@@ -241,10 +413,29 @@ function drawDebt(points) {
     }
   });
 
+  if (comparable.length > 1 && comparable.length === points.length) {
+    var fixedTip = "<b>Like-for-like.</b><br>The same runs counting only the " +
+      esc(comparable[0].rules) + " rule(s) all of them measured.<br>" +
+      "Lower than the headline because it counts fewer rules, not because debt is lower.";
+    parts.push('<polyline class="fixedline" data-tip="' + esc(fixedTip) + '" points="' +
+      comparable.map(function (c, i) { return xs[i] + "," + sc.y(c.total); }).join(" ") + '"/>');
+    comparable.forEach(function (c, i) {
+      parts.push('<circle class="fixeddot" cx="' + xs[i] + '" cy="' + sc.y(c.total) +
+        '" r="4" data-tip="' + esc("<b>" + stamp(c.measured_at) + "</b><br>" + c.total +
+          " violations on the " + c.rules + " rules measured by every run") + '"/>');
+    });
+    document.getElementById("debtlegend").innerHTML =
+      '<span class="swatch solid"></span> as reported by the project ' +
+      '<span class="swatch dashed"></span> like-for-like: only the ' + esc(comparable[0].rules) +
+      ' rule(s) every run measured';
+  } else {
+    document.getElementById("debtlegend").textContent = "";
+  }
+
   for (var j = 0; j < points.length; j += 1) {
     var point = points[j];
     var x = xs[j], y = sc.y(point.total);
-    var tip = "<b>" + esc(shortDate(point.measured_at)) + "</b><br>" +
+    var tip = "<b>" + esc(stamp(point.measured_at)) + "</b><br>" +
       esc(point.total) + " violations · ruleset <code>" + esc(point.ruleset_id) + "</code>";
     parts.push('<circle class="dot" cx="' + x + '" cy="' + y + '" r="5" data-tip="' + esc(tip) + '"/>');
 
@@ -271,16 +462,17 @@ function drawDebt(points) {
     }
   }
 
+  drawNow(parts, width - right + 12, top, height, bottom, points[points.length - 1].measured_at, now);
   target.innerHTML = parts.join("");
   bindTips(target);
 }
 
-function drawCiCost(points) {
+function drawCiCost(points, now) {
   var target = document.getElementById("cicost");
   var legend = document.getElementById("cilegend");
   if (!points.length) { empty(target, "No CI cost periods yet."); legend.textContent = ""; return; }
 
-  var width = 640, height = 300, left = 56, right = 16, top = 34, bottom = 46;
+  var width = 640, height = 300, left = 56, right = 74, top = 34, bottom = 46;
   var sc = scale(points.map(function (p) { return p.median_minutes_per_pr; }), height, top, bottom);
   var step = points.length > 1 ? (width - left - right) / (points.length - 1) : 0;
   var parts = [];
@@ -297,7 +489,7 @@ function drawCiCost(points) {
       return esc(w.workflow) + ": " + esc(w.median_minutes) + " min median, " +
         esc(w.jobs) + " jobs, " + esc(w.total_minutes) + " min total";
     }).join("<br>");
-    var tip = "<b>" + esc(shortDate(point.period_start)) + "</b><br>" +
+    var tip = "<b>" + esc(stamp(point.period_start)) + "</b><br>" +
       esc(point.prs) + " PRs · median " + esc(point.median_minutes_per_pr) + " min/PR" +
       (rows ? "<br><br>" + rows : "");
     parts.push('<circle class="dot" cx="' + coords[i][0] + '" cy="' + coords[i][1] + '" r="5" data-tip="' +
@@ -309,6 +501,7 @@ function drawCiCost(points) {
     }
   });
 
+  drawNow(parts, width - right + 12, top, height, bottom, points[points.length - 1].period_start, now);
   target.innerHTML = parts.join("");
   bindTips(target);
 
@@ -316,6 +509,8 @@ function drawCiCost(points) {
   var last = points[points.length - 1].median_minutes_per_pr;
   legend.textContent = "First period " + first + " min/PR, latest " + last +
     " min/PR across " + points.reduce(function (n, p) { return n + p.prs; }, 0) + " pull requests.";
+  document.getElementById("cip0").textContent =
+    Math.round(last * 10 / 6) / 10 + " compute-hours";
 }
 
 /* Sankey without a charting library: layer the nodes by longest path from a source, size them by
@@ -435,6 +630,166 @@ function drawFunnel(counts) {
   }).join("");
 }
 
+var CLAIM_BADGE = {
+  improving: ["lozenge-success", "improving"],
+  worsening: ["lozenge-danger", "worsening"],
+  flat: ["lozenge-neutral", "flat"],
+  "no data": ["lozenge-neutral", "no data"],
+  "too early": ["lozenge-warning", "too early to say"],
+  "not yet comparable": ["lozenge-warning", "not yet comparable"]
+};
+
+function drawThesis(claims) {
+  document.getElementById("thesis").innerHTML = claims.map(function (claim) {
+    var badge = CLAIM_BADGE[claim.status] || ["lozenge-neutral", claim.status];
+    var from = claim.from === undefined || claim.from === null ? "" :
+      '<div class="unit">from ' + esc(claim.from) + (claim.since ? " on " + esc(shortDate(claim.since)) : "") + "</div>";
+    return '<div class="card claim">' +
+      '<div class="card-header">' + esc(claim.goal) +
+      ' <span class="lozenge ' + badge[0] + '">' + esc(badge[1]) + "</span></div>" +
+      '<div class="card-body">' +
+      '<div class="value">' + (claim.value === undefined || claim.value === null ? "—" : esc(claim.value)) + "</div>" +
+      '<div class="unit">' + esc(claim.unit || claim.measure) + "</div>" + from +
+      '<p class="detail">' + esc(claim.detail || "") + "</p>" +
+      "</div></div>";
+  }).join("");
+}
+
+function metric(value, label) {
+  return '<div class="metric"><b>' + (value === null || value === undefined ? "—" : esc(value)) +
+    "</b><span>" + esc(label) + "</span></div>";
+}
+
+function drawThroughput(t) {
+  document.getElementById("throughput").innerHTML =
+    metric(t.sessions_started, "sessions dispatched") +
+    metric(t.in_flight, "in flight") +
+    metric(t.delivered, "pull requests delivered") +
+    metric(t.delivery_rate === null ? null : Math.round(t.delivery_rate * 100) + "%", "delivery rate (settled sessions)") +
+    metric(t.escalated + t.errored, "escalated or errored") +
+    metric(t.median_hours_to_delivery, "median hours to a PR") +
+    metric(t.acus_per_delivered_pr, "ACUs per delivered PR") +
+    metric(t.ci_minutes_committed, "CI minutes those PRs cost");
+}
+
+/* Dispatch: a directed graph, dispatch burst -> Devin session -> outcome, one edge per session.
+   A bar chart answers "how many" and hides the thing worth seeing: a single trigger fans out to
+   many Devins, and those Devins do not all end the same way. Drawn as a graph, fan-out is a
+   literal branch and a session that errored cannot hide inside a day's total. Layout is three
+   fixed columns rather than a general layered algorithm, because the graph is known to be exactly
+   three deep and a reviewer reading left to right should never have to work out the depth. */
+var DAG_LAYERS = { dispatch: 0, session: 1, outcome: 2 };
+
+function dagBox(parts, x, y, w, h, node, title, subtitle, tip) {
+  var cls = "dagbox" + (node.kind === "session" || node.kind === "outcome" ? " " + node.outcome : "");
+  var open = node.session_url ? '<a href="' + esc(node.session_url) + '" target="_blank" rel="noopener">' : "";
+  parts.push(open +
+    '<rect class="' + cls + '" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+    '" rx="6" data-tip="' + esc(tip) + '"/>' +
+    '<text class="dagtext" x="' + (x + 10) + '" y="' + (y + (subtitle ? 20 : h / 2 + 4)) + '">' + esc(title) + "</text>" +
+    (subtitle ? '<text class="dagsub" x="' + (x + 10) + '" y="' + (y + 36) + '">' + esc(subtitle) + "</text>" : "") +
+    (open ? "</a>" : ""));
+}
+
+function drawDispatch(graph, now) {
+  var target = document.getElementById("dispatch");
+  var nodes = (graph && graph.nodes) || [];
+  if (!nodes.length) { empty(target, "No sessions dispatched yet."); return; }
+
+  var columns = [[], [], []];
+  nodes.forEach(function (node) { columns[DAG_LAYERS[node.kind]].push(node); });
+
+  var boxW = 260, boxH = 46, gapY = 16, top = 40, left = 24;
+  var rows = Math.max(columns[0].length, columns[1].length, columns[2].length);
+  var height = top + rows * (boxH + gapY) + 30;
+  var width = 1280;
+  var colX = [left, (width - boxW) / 2, width - boxW - left];
+  var place = {};
+
+  var parts = [];
+  ["dispatched", "Devin session", "outcome"].forEach(function (label, i) {
+    parts.push('<text class="lbl" x="' + (colX[i] + (i === 2 ? boxW : 0)) + '" y="20" text-anchor="' +
+      (i === 2 ? "end" : "start") + '">' + esc(label) + "</text>");
+  });
+
+  columns.forEach(function (column, layer) {
+    var span = rows * (boxH + gapY);
+    var step = column.length ? span / column.length : 0;
+    column.forEach(function (node, i) {
+      var y = top + step * i + (step - boxH) / 2;
+      place[node.id] = { x: colX[layer], y: y, cx: colX[layer] + boxW };
+    });
+  });
+
+  /* Edges first so the boxes sit on top of them rather than being crossed by their own strokes. */
+  ((graph && graph.edges) || []).forEach(function (edge) {
+    var a = place[edge.source], b = place[edge.target];
+    if (!a || !b) { return; }
+    var x1 = a.x + boxW, y1 = a.y + boxH / 2, x2 = b.x, y2 = b.y + boxH / 2, mid = (x1 + x2) / 2;
+    parts.push('<path class="dagedge ' + (edge.outcome || "dispatch") + '" d="M' + x1 + ' ' + y1 +
+      " C" + mid + " " + y1 + " " + mid + " " + y2 + " " + x2 + " " + y2 + '"/>');
+  });
+
+  columns.forEach(function (column, layer) {
+    column.forEach(function (node) {
+      var at = place[node.id];
+      if (layer === 0) {
+        dagBox(parts, at.x, at.y, boxW, boxH, node, node.label, node.detail,
+          "<b>" + node.label + "</b><br>" + node.detail);
+      } else if (layer === 1) {
+        dagBox(parts, at.x, at.y, boxW, boxH, node, node.label, node.detail,
+          "<b>" + node.label + "</b><br>" + node.detail + "<br>" +
+          (node.pr_url ? node.pr_url : "no pull request recorded") + "<br>click to open the session");
+      } else {
+        dagBox(parts, at.x, at.y, boxW, boxH, node, node.label, node.count + " session" +
+          (node.count === 1 ? "" : "s"), "<b>" + node.label + "</b><br>" + node.count + " session(s)");
+      }
+    });
+  });
+
+  parts.push('<text class="nowtext" x="' + (width - left) + '" y="' + (height - 8) +
+    '" text-anchor="end">as of ' + esc(stamp(now.toISOString())) + "</text>");
+  target.setAttribute("viewBox", "0 0 " + width + " " + height);
+  target.innerHTML = parts.join("");
+  bindTips(target);
+}
+
+var FLEET_STATE = {
+  session_started: ["lozenge-inprogress", "running"],
+  work_delivered: ["lozenge-success", "work delivered"],
+  draft_awaiting_authorship: ["lozenge-warning", "awaiting authorship"],
+  escalated: ["lozenge-warning", "escalated"],
+  errored: ["lozenge-danger", "errored"]
+};
+
+function drawFleet(sessions, now) {
+  var running = sessions.filter(function (s) { return s.running; }).length;
+  var pill = document.getElementById("fleetpill");
+  pill.textContent = running ? running + " session" + (running === 1 ? "" : "s") + " running"
+    : sessions.length + " sessions, none running";
+  pill.className = running ? "lozenge lozenge-inprogress" : "lozenge lozenge-neutral";
+
+  var body = document.querySelector("#fleet tbody");
+  if (!sessions.length) {
+    body.innerHTML = '<tr><td colspan="8">No sessions started yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = sessions.map(function (s) {
+    var badge = FLEET_STATE[s.state] || ["lozenge-neutral", s.state.replace(/_/g, " ")];
+    var pr = s.pr_url ? '<a href="' + esc(s.pr_url) + '">' + esc(s.pr_url.split("/").slice(-2).join(" #")) + "</a>" : "—";
+    return "<tr>" +
+      '<td><a href="' + esc(s.session_url) + '"><code>' + esc(s.session_id.slice(0, 20)) + "…</code></a></td>" +
+      "<td>" + esc(s.repo) + " → " + esc(s.target_repo) + "</td>" +
+      "<td>" + esc(s.stream) + "</td>" +
+      '<td><span class="lozenge ' + badge[0] + '">' + esc(badge[1]) + "</span></td>" +
+      "<td>" + pr + "</td>" +
+      '<td class="num">' + (s.acus_consumed === null ? "—" : esc(s.acus_consumed)) + "</td>" +
+      "<td>" + esc(stamp(s.started_at)) + "</td>" +
+      "<td>" + esc(ago(s.updated_at, now)) + "</td>" +
+      "</tr>";
+  }).join("");
+}
+
 function drawOutbox(items) {
   document.getElementById("outboxcount").textContent = String(items.length);
   var pill = document.getElementById("outboxpill");
@@ -442,39 +797,84 @@ function drawOutbox(items) {
   pill.className = items.length ? "lozenge lozenge-inprogress" : "lozenge lozenge-success";
   var body = document.querySelector("#outbox tbody");
   if (!items.length) {
-    body.innerHTML = '<tr><td colspan="3">Nothing waiting on a human paragraph.</td></tr>';
+    body.innerHTML = '<tr><td colspan="4">Nothing waiting on a human paragraph.</td></tr>';
     return;
   }
   body.innerHTML = items.map(function (item) {
     var link = item.pr_url
       ? '<a href="' + esc(item.pr_url) + '">' + esc(item.title || item.pr_url) + '</a>'
       : esc(item.title || "");
+    var blocked = (item.blocked_by || []).map(function (name) {
+      return '<code>' + esc(name) + '</code>';
+    }).join(" ") || "—";
+    var profile = item.profile ? " " + esc(item.profile) : "";
     return "<tr><td><code>" + esc(item.task_id) + "</code></td><td>" + link +
-      '</td><td class="num">' + esc(item.waiting_days) + "</td></tr>";
+      "</td><td>" + blocked + '<span class="legend">' + profile + "</span></td>" +
+      '<td class="num">' + esc(item.waiting_days) + "</td></tr>";
   }).join("");
 }
 
+/* Tabs are panels on one document rather than routes: the page fetches a single data document, and
+   splitting it across navigations would mean four fetches of the same JSON and four different
+   "as of" times on charts that are supposed to describe one instant. */
+function showPanel(name) {
+  var links = document.querySelectorAll("#tabs .nav-link[data-panel]");
+  for (var i = 0; i < links.length; i += 1) {
+    var active = links[i].dataset.panel === name;
+    links[i].classList.toggle("active", active);
+    if (active) { links[i].setAttribute("aria-current", "page"); } else { links[i].removeAttribute("aria-current"); }
+    document.getElementById("panel-" + links[i].dataset.panel).hidden = !active;
+  }
+}
+
+document.getElementById("tabs").addEventListener("click", function (event) {
+  var link = event.target.closest("a[data-panel]");
+  if (!link) { return; }
+  event.preventDefault();
+  window.location.hash = link.dataset.panel;
+  showPanel(link.dataset.panel);
+});
+
 function render(data) {
+  var now = data.generated_at ? new Date(data.generated_at) : new Date();
   document.getElementById("subtitle").textContent =
     "Repository under measurement: " + (data.repo || "unknown") +
-    " · debt and CI cost are measured independently of the agent that changed the code.";
-  drawDebt(data.debt || []);
-  drawCiCost(data.ci_cost || []);
+    " · debt and CI cost are measured independently of the agent that changed the code" +
+    " · as of " + stamp(data.generated_at || new Date().toISOString());
+  var asof = "as of " + stamp(data.generated_at || new Date().toISOString());
+  ["flowasof", "fleetasof", "funnelasof", "dispatchasof"].forEach(function (id) {
+    document.getElementById(id).textContent = asof;
+  });
+  var throughput = data.throughput || { daily: [] };
+  drawThesis(data.thesis || []);
+  drawThroughput(throughput);
+  drawDispatch(data.dispatch_graph || { nodes: [], edges: [] }, now);
+  drawDebt(data.debt || [], data.debt_comparable || [], now);
+  drawCiCost(data.ci_cost || [], now);
   drawSankey(data.flow || []);
+  drawFleet(data.fleet || [], now);
   drawFunnel(data.funnel || {});
   drawOutbox(data.outbox || []);
 }
 
-fetch(window.location.pathname.replace(/\/$/, "") + "/data")
-  .then(function (response) {
-    if (!response.ok) { throw new Error("data endpoint returned " + response.status); }
-    return response.json();
-  })
-  .then(render)
-  .catch(function (error) {
-    document.getElementById("subtitle").innerHTML =
-      '<span class="err">Could not load the data document: ' + esc(error.message) + "</span>";
-  });
+function load() {
+  return fetch(window.location.pathname.replace(/\/$/, "") + "/data")
+    .then(function (response) {
+      if (!response.ok) { throw new Error("data endpoint returned " + response.status); }
+      return response.json();
+    })
+    .then(render)
+    .catch(function (error) {
+      document.getElementById("subtitle").innerHTML =
+        '<span class="err">Could not load the data document: ' + esc(error.message) + "</span>";
+    });
+}
+
+showPanel((window.location.hash || "#trends").slice(1));
+load();
+/* A reviewer may open this while sessions are still running, so the page refreshes itself; the
+   fleet roster and the flow are positions, and a stale position is a wrong one. */
+window.setInterval(load, 30000);
 </script>
 </body>
 </html>
