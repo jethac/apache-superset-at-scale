@@ -25,6 +25,27 @@ on deployment day. Get this backwards and the "before" column of a before/after
 report is empty, and the whole thing becomes an assertion rather than a
 measurement. See [`docs/PRD.md`](docs/PRD.md) for the full rationale.
 
+## Where to look first
+
+If you are reviewing this rather than operating it, the three things worth
+checking are the trigger, the Devin call, and the loop that closes behind it.
+
+| Claim | Where it lives | How to see it |
+| --- | --- | --- |
+| Triggered by an event | `POST /webhook/github` in [`api.py`](src/scoreboard/api.py) (HMAC-verified) and `scoreboard poll` in [`cli.py`](src/scoreboard/cli.py) (scheduled) | `scoreboard replay --event issues payload.json` |
+| Routing is data, not code | [`scope.yaml`](scope.yaml) → [`flow.py`](src/scoreboard/flow.py) | edit a rule, replay the same payload |
+| Sessions started programmatically | `HttpDevinClient.create_session` in [`devin.py`](src/scoreboard/devin.py), called from `Orchestrator.handle` | `POST /sessions` against `api.devin.ai` |
+| Sessions *managed*, not fired and forgotten | `Orchestrator.sync` in [`orchestrator.py`](src/scoreboard/orchestrator.py) | `scoreboard sync` |
+| Observable output | pull requests on the fork, plus `GET /dashboard` | `GET /funnel`, `GET /compliance` |
+| Nothing is lost between intake and outcome | `reconciles` in [`store.py`](src/scoreboard/store.py) | asserted in CI; the CLI exits non-zero if it fails |
+
+The interesting design decisions, in rough order of how much argument they took:
+upstream is unwritable by construction rather than by policy (`assert_writable`);
+the authorship gate blocks on the *paragraph a human must write*, not on an
+approval click, so the queue collects the artifact the rule actually asks for;
+and the debt series treats a ruleset change as an instrument change and draws a
+break rather than a slope. Each is argued where it is implemented.
+
 ## Try it in one command, with no credentials
 
 The simulator runs the real code paths — real scope rules, real orchestrator,
@@ -87,6 +108,17 @@ Create the Devin key from a dedicated service user with a minimal role
 (<https://docs.devin.ai/api-reference/authentication>) rather than from your own
 account, so its actions are attributable and it can be revoked without
 disrupting a human.
+
+Use a **fine-grained** GitHub token scoped to the fork and this repository only,
+with Contents and Pull requests read/write and Issues read. Deliberately do not
+grant it the upstream repository: intake reads public issues, which needs no
+credential at all, so "upstream is read-only" becomes a property of the token
+rather than only of `assert_writable`. Add Actions: read on whichever repository
+you point `scoreboard cicost` at.
+
+Devin's sessions clone through your Devin organisation's git integration, not
+through this token. They are separate grants and the wizard checks both, because
+the second one otherwise fails later, at clone time.
 
 ## Run the service
 
