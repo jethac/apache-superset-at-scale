@@ -620,8 +620,8 @@ function drawSankey(edges) {
 }
 
 function drawFunnel(counts) {
-  var order = ["triggered", "filtered", "deduped", "admitted", "work_delivered",
-    "awaiting_authorship", "escalated", "errored", "in_flight"];
+  var order = ["triggered", "filtered", "deduped", "admitted", "queued", "in_flight",
+    "work_delivered", "awaiting_authorship", "escalated", "errored"];
   var keys = order.filter(function (key) { return Object.prototype.hasOwnProperty.call(counts, key); });
   Object.keys(counts).forEach(function (key) { if (keys.indexOf(key) === -1) { keys.push(key); } });
   document.getElementById("funnel").innerHTML = keys.map(function (key) {

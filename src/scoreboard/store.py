@@ -413,13 +413,19 @@ class FactStore:
         state: str,
         pr_url: str | None,
         pr_is_draft: bool,
-        acus_consumed: float,
+        acus_consumed: float | None,
         updated_at: datetime,
     ) -> None:
+        """Record what a session ended up doing, leaving unreported cost unreported.
+
+        The API does not always carry an ACU figure, and writing a zero for a session that
+        certainly spent something turns a gap in the data into a claim that the work was free.
+        A missing figure leaves whatever was last known in place.
+        """
         with self._tx() as connection:
             connection.execute(
                 "UPDATE fact_task SET state = ?, pr_url = COALESCE(?, pr_url), pr_is_draft = ?,"
-                " acus_consumed = ?, updated_at = ? WHERE task_id = ?",
+                " acus_consumed = COALESCE(?, acus_consumed), updated_at = ? WHERE task_id = ?",
                 (
                     state,
                     pr_url,

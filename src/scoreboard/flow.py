@@ -12,6 +12,10 @@ Admitted work is dispatched into a session before it can produce anything, so `I
 stage rather than an outcome: every admitted task crosses it, and only the ones whose session has
 not settled stop there. Drawing it as a sibling of the outcomes would put running work in the same
 column as a delivered draft and read as though the two were the same stage.
+
+Work admitted beyond the concurrency cap has no session at all, so it waits in `Queued` instead:
+counting it as in flight would report a fleet larger than the one the Devin app shows, and the
+queue is the number that says whether the cap is the thing holding delivery back.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ NODE_AWAITING_AUTHORSHIP = "Draft awaiting authorship"
 NODE_ESCALATED = "Escalated to human"
 NODE_ERRORED = "Errored"
 NODE_IN_FLIGHT = "In flight"
+NODE_QUEUED = "Queued for capacity"
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,10 @@ def build_edges(store: FactStore) -> list[FlowEdge]:
             continue
 
         counts[(stream, NODE_INTAKE, NODE_ADMITTED)] += 1
+        if state is TaskState.TRIGGERED:
+            counts[(stream, NODE_ADMITTED, NODE_QUEUED)] += 1
+            continue
+
         counts[(stream, NODE_ADMITTED, NODE_IN_FLIGHT)] += 1
         if state not in _UNSETTLED:
             counts[(stream, NODE_IN_FLIGHT, _OUTCOMES[state])] += 1
@@ -106,8 +115,8 @@ def funnel(store: FactStore) -> dict[str, int]:
         "awaiting_authorship": by_state.get(TaskState.DRAFT_AWAITING_AUTHORSHIP.value, 0),
         "escalated": by_state.get(TaskState.ESCALATED.value, 0),
         "errored": by_state.get(TaskState.ERRORED.value, 0),
-        "in_flight": by_state.get(TaskState.SESSION_STARTED.value, 0)
-        + by_state.get(TaskState.TRIGGERED.value, 0),
+        "queued": by_state.get(TaskState.TRIGGERED.value, 0),
+        "in_flight": by_state.get(TaskState.SESSION_STARTED.value, 0),
     }
 
 
@@ -120,6 +129,7 @@ def reconciles(counts: dict[str, int]) -> bool:
         + counts["awaiting_authorship"]
         + counts["escalated"]
         + counts["errored"]
+        + counts["queued"]
         + counts["in_flight"]
     )
     return terminal == counts["triggered"]
