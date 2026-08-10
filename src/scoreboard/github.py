@@ -10,6 +10,8 @@ Two properties are load-bearing:
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,6 +20,8 @@ from typing import Any, Protocol
 import httpx
 
 from .models import Event, EventType, Severity, WorkflowRunRef, digest_payload
+
+logger = logging.getLogger(__name__)
 
 UPSTREAM_REPOS = frozenset({"apache/superset"})
 
@@ -72,6 +76,29 @@ def assert_writable(repo: str, allow_upstream_write: bool) -> None:
         )
 
 
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """How long GitHub is asking us to wait, or None if it is not asking.
+
+    Two mechanisms, and both have to be read. The secondary limit sends `Retry-After`; the primary
+    one sends `x-ratelimit-remaining: 0` with the reset as an epoch. A 403 with neither is an
+    ordinary permission error and must not be retried.
+    """
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            return None
+    if response.headers.get("x-ratelimit-remaining") == "0":
+        reset = response.headers.get("x-ratelimit-reset")
+        if reset:
+            try:
+                return max(0.0, float(reset) - time.time())
+            except ValueError:
+                return None
+    return None
+
+
 def _parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -86,6 +113,8 @@ class HttpGitHubClient:
         token: str | None = None,
         api_url: str = "https://api.github.com",
         timeout: float = 30.0,
+        max_retries: int = 3,
+        max_retry_wait: float = 120.0,
     ):
         headers = {
             "Accept": "application/vnd.github+json",
@@ -94,11 +123,36 @@ class HttpGitHubClient:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         self._client = httpx.Client(base_url=api_url.rstrip("/"), timeout=timeout, headers=headers)
+        self._max_retries = max_retries
+        self._max_retry_wait = max_retry_wait
+
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        """A GET that waits when GitHub asks it to, rather than failing the run.
+
+        Collecting a ninety-day window over a busy repository is thousands of requests, and both
+        the primary rate limit and the secondary abuse limit answer with a header saying when to
+        come back. Raising on those turns a windowed collection into a partial one — worse than a
+        slow one, because `collect` is meant to be idempotent and a run that dies halfway leaves
+        the operator guessing which half is present.
+
+        A plain 403 carries no such header and is returned immediately; only a documented wait is
+        waited on, and only up to `max_retry_wait`, past which failing is the honest outcome.
+        """
+        for _ in range(self._max_retries):
+            response = self._client.get(path, params=params)
+            if response.status_code not in (403, 429):
+                return response
+            wait = _retry_after_seconds(response)
+            if wait is None or wait > self._max_retry_wait:
+                return response
+            logger.warning("rate limited on %s; waiting %.0fs", path, wait)
+            time.sleep(wait + 1.0)
+        return self._client.get(path, params=params)
 
     def _paginate(self, path: str, params: dict[str, Any]) -> Iterator[dict[str, Any]]:
         page = 1
         while True:
-            response = self._client.get(path, params={**params, "per_page": 100, "page": page})
+            response = self._get(path, params={**params, "per_page": 100, "page": page})
             response.raise_for_status()
             batch = response.json()
             if not isinstance(batch, list) or not batch:
@@ -136,29 +190,61 @@ class HttpGitHubClient:
             )
         return events
 
+    def _pull_request_detail(self, repo: str, number: int) -> dict[str, Any]:
+        """The fields the list endpoint omits.
+
+        `additions`, `deletions` and `changed_files` are returned only by the single-pull-request
+        endpoint. Reading them off a list entry yields `None` for every pull request, and the `or
+        0` that follows turns that into a diff-size column which reads as measured and is
+        uniformly wrong — the failure the PRD's caveat list exists to prevent, arriving as a fact
+        rather than as a caveat.
+        """
+        response = self._get(f"/repos/{repo}/pulls/{number}")
+        if response.status_code == 404:
+            return {}
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
     def list_pull_requests(
         self, repo: str, since: datetime, until: datetime
     ) -> list[PullRequestFact]:
+        """Pull requests opened in the window, with their diff size.
+
+        The walk stops at the first pull request older than the window rather than paging to the
+        beginning of the repository. The list is sorted newest-first, so everything past that
+        point is older too; on a project with tens of thousands of pull requests the difference is
+        a few requests against a few hundred, on every collection.
+
+        Diff size then costs one request per pull request in the window, which is the price of the
+        column being real. It is charged only for pull requests that survive the window filter.
+        """
         facts: list[PullRequestFact] = []
         params = {"state": "all", "sort": "created", "direction": "desc"}
         for pull in self._paginate(f"/repos/{repo}/pulls", params):
             opened_at = _parse_time(pull.get("created_at"))
-            if opened_at is None or not since <= opened_at <= until:
+            if opened_at is None:
                 continue
+            if opened_at < since:
+                break
+            if opened_at > until:
+                continue
+            number = int(pull.get("number") or 0)
+            detail = self._pull_request_detail(repo, number)
             user = pull.get("user") or {}
             facts.append(
                 PullRequestFact(
                     pr_url=str(pull.get("html_url") or ""),
                     repo=repo,
-                    number=int(pull.get("number") or 0),
+                    number=number,
                     author=str(user.get("login") or ""),
                     is_bot=str(user.get("type") or "").lower() == "bot",
                     opened_at=opened_at,
                     merged_at=_parse_time(pull.get("merged_at")),
                     closed_at=_parse_time(pull.get("closed_at")),
-                    additions=int(pull.get("additions") or 0),
-                    deletions=int(pull.get("deletions") or 0),
-                    changed_files=int(pull.get("changed_files") or 0),
+                    additions=int(detail.get("additions") or 0),
+                    deletions=int(detail.get("deletions") or 0),
+                    changed_files=int(detail.get("changed_files") or 0),
                     review_rounds=0,
                     first_push_checks_passed=None,
                 )
@@ -199,7 +285,7 @@ class HttpGitHubClient:
         every run. Attributing minutes by head commit instead is what makes a cost-per-pull-request
         figure describe the project rather than the handful of branches pushed by committers.
         """
-        response = self._client.get(f"/repos/{repo}/commits/{sha}/pulls", params={"per_page": 1})
+        response = self._get(f"/repos/{repo}/commits/{sha}/pulls", params={"per_page": 1})
         if response.status_code == 404:
             return None
         response.raise_for_status()
@@ -211,9 +297,7 @@ class HttpGitHubClient:
         return int(number) if number is not None else None
 
     def get_run_jobs(self, repo: str, run_id: int) -> str:
-        response = self._client.get(
-            f"/repos/{repo}/actions/runs/{run_id}/jobs", params={"per_page": 100}
-        )
+        response = self._get(f"/repos/{repo}/actions/runs/{run_id}/jobs", params={"per_page": 100})
         response.raise_for_status()
         return response.text
 
@@ -223,7 +307,7 @@ class HttpGitHubClient:
         """Pagination for the Actions endpoints, which wrap their list in an envelope."""
         page = 1
         while True:
-            response = self._client.get(path, params={**params, "per_page": 100, "page": page})
+            response = self._get(path, params={**params, "per_page": 100, "page": page})
             response.raise_for_status()
             batch = response.json().get(key) or []
             if not batch:
@@ -234,7 +318,7 @@ class HttpGitHubClient:
             page += 1
 
     def get_pull_request_body(self, repo: str, number: int) -> str:
-        response = self._client.get(f"/repos/{repo}/pulls/{number}")
+        response = self._get(f"/repos/{repo}/pulls/{number}")
         response.raise_for_status()
         return str(response.json().get("body") or "")
 

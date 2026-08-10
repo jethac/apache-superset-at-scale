@@ -24,7 +24,7 @@ from statistics import median
 from typing import Literal, Protocol
 
 from .models import WorkflowRunRef
-from .store import FactStore
+from .store import FactStore, configure_connection
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS fact_ci_job (
@@ -115,10 +115,16 @@ def _connect(store: FactStore) -> Iterator[sqlite3.Connection]:
     `FactStore` exposes reads and its own upserts, not arbitrary writes, and this table belongs to
     this module rather than to the store's schema. Writing through a separate connection to the
     same file keeps that boundary without editing `store.py`.
+
+    The boundary is about which module owns which table; it is not licence to open the file on
+    different terms. `configure_connection` is shared so that every writer agrees on WAL and on the
+    busy timeout — a single connection left on the default rollback journal would reintroduce the
+    exclusive lock for everyone.
     """
-    connection = sqlite3.connect(store.path)
+    connection = sqlite3.connect(store.path, timeout=30.0)
     try:
         connection.row_factory = sqlite3.Row
+        configure_connection(connection)
         yield connection
         connection.commit()
     finally:

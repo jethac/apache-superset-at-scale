@@ -102,15 +102,40 @@ CREATE INDEX IF NOT EXISTS idx_pr_cohort ON fact_pr (cohort, opened_at);
 """
 
 
+def configure_connection(connection: sqlite3.Connection) -> None:
+    """Apply the concurrency settings every connection to the fact store needs.
+
+    The store is written by more than one process — `serve` handles webhooks while `poll` runs
+    intake and session sync on a timer — and by more than one connection within a process, because
+    modules that own their own tables open their own. `FactStore`'s lock only serialises the
+    connection it holds, so it cannot be what keeps those apart.
+
+    WAL is what does. Under the default rollback journal a writer takes an exclusive lock on the
+    whole database and readers block behind it, so the poller's five-minute pass would stall the
+    dashboard and, past the timeout, fail it. In WAL mode readers proceed against the last
+    committed snapshot while a writer appends, which is the shape of this workload: one periodic
+    writer, a page that reads on every load. `busy_timeout` covers the remaining case of two
+    writers arriving together, which SQLite still serialises.
+    """
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=30000")
+    # NORMAL is durable across process crashes in WAL mode; it forgoes only the fsync per commit
+    # that protects against an OS-level crash, which for a store that is rebuilt by re-running the
+    # collector is not worth the write amplification.
+    connection.execute("PRAGMA synchronous=NORMAL")
+
+
 class FactStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # The webhook service handles requests on a thread pool, so the connection is shared
         # across threads and serialised by an explicit lock rather than by SQLite's owning-thread
-        # check.
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        # check. The lock does not extend to other processes or other connections; see
+        # `configure_connection`.
+        self._connection = sqlite3.connect(self.path, check_same_thread=False, timeout=30.0)
         self._connection.row_factory = sqlite3.Row
+        configure_connection(self._connection)
         self._lock = threading.Lock()
         with self._lock:
             self._connection.executescript(SCHEMA)
