@@ -118,7 +118,7 @@ class FactStore:
             self._connection.commit()
 
     def _migrate(self) -> None:
-        """Additive column adds for stores created by an earlier schema."""
+        """Additive column adds, and repairs, for stores created by an earlier schema."""
         columns = {
             str(row["name"]) for row in self._connection.execute("PRAGMA table_info(fact_task)")
         }
@@ -126,6 +126,23 @@ class FactStore:
             self._connection.execute(
                 "ALTER TABLE fact_task ADD COLUMN dedupe_hits INTEGER NOT NULL DEFAULT 0"
             )
+        self._repair_mislabelled_dedupes()
+
+    def _repair_mislabelled_dedupes(self) -> None:
+        """Restore the verdict on rows an earlier intake overwrote with `deduped`.
+
+        Intake once wrote a `deduped` task every time it saw an issue it had already seen, which
+        buried the original verdict: an out-of-scope issue re-read on ninety-six polls ended up
+        indistinguishable from a genuine duplicate, and the funnel read as if the fleet spent its
+        time deduplicating. Re-sightings are counted in `dedupe_hits` instead, so a stored
+        `deduped` state with no re-sightings and no session can only be that overwrite, and the
+        row's own admission decision says what it should have been.
+        """
+        self._connection.execute(
+            "UPDATE fact_task SET state = ?"
+            " WHERE state = ? AND dedupe_hits = 0 AND session_id IS NULL AND admitted = 0",
+            (TaskState.FILTERED.value, TaskState.DEDUPED.value),
+        )
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
