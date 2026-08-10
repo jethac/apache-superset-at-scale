@@ -265,6 +265,15 @@ intervene in. Routing is also re-evaluated on every sighting of work that has
 not started yet, so widening a rule picks up issues that were already seen and
 filtered — a rule edit does not need a database edit to take effect.
 
+**The fleet is larger than what this process dispatched.** A human, or another
+Devin working the same backlog, starts sessions that spend the same ACUs against
+the same repository, and a roster built only from this deployment's own dispatches
+reports a smaller fleet than the Devin app does. Each `sync` lists sessions from
+the Devin API and adopts any carrying a tag in `defaults.adopt_session_tags`, so
+ownership is a configuration decision rather than a guess: sessions belonging to
+anything else in the organisation are left alone. Adopted rows say so in their
+reason, so the funnel never presents them as work this deployment routed.
+
 **Upstream is read-only.** We read `apache/superset` issues; the resulting pull
 request is opened on the fork. `assert_writable` refuses any upstream target
 unless `ALLOW_UPSTREAM_WRITE` is explicitly set, so no rule edit alone can cause

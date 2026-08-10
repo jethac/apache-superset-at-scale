@@ -91,6 +91,7 @@ class Defaults(BaseModel):
     tags: list[str] = Field(default_factory=list)
     max_acu_limit: int | None = None
     max_concurrent_sessions: int | None = None
+    adopt_session_tags: list[str] = Field(default_factory=list)
 
 
 class ScopeConfig(BaseModel):

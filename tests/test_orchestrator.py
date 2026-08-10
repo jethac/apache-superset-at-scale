@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scoreboard.devin import FakeDevinClient, SessionState
+from scoreboard.devin import FakeDevinClient, SessionState, SessionSummary
 from scoreboard.flow import build_edges, funnel, reconciles
 from scoreboard.github import WriteNotPermittedError
 from scoreboard.models import Decision, TaskState
@@ -218,3 +218,78 @@ def test_an_issue_filtered_under_older_rules_is_admitted_once_the_rules_widen(
     )[0]
     assert row["admitted"] == 1
     assert row["state"] == TaskState.TRIGGERED.value
+
+
+def _adopting(scope: ScopeConfig) -> ScopeConfig:
+    return scope.model_copy(
+        update={
+            "defaults": scope.defaults.model_copy(
+                update={"adopt_session_tags": ["fde:initiative=superset-scoreboard"]}
+            )
+        }
+    )
+
+
+def _foreign(session_id: str, tags: list[str]) -> SessionSummary:
+    return SessionSummary(
+        session_id=session_id,
+        title="Another Devin, same backlog",
+        tags=tags,
+        status="running",
+        created_at=None,
+    )
+
+
+def test_a_session_started_elsewhere_joins_the_fleet(store: FactStore, scope: ScopeConfig) -> None:
+    """The reviewer counts Devins in the Devin app; the roster has to agree with them."""
+    devin = FakeDevinClient(seed=3)
+    devin.foreign_sessions.append(
+        _foreign(
+            "devin-foreign",
+            ["fde:initiative=superset-scoreboard", "fde:stream=techdebt"],
+        )
+    )
+    runner = Orchestrator(scope=_adopting(scope), store=store, devin=devin, dry_run=False)
+
+    assert runner.adopt() == ["devin-foreign"]
+    row = store.query("SELECT state, session_id, stream FROM fact_task")[0]
+    assert row["session_id"] == "devin-foreign"
+    assert row["state"] == TaskState.SESSION_STARTED.value
+    assert row["stream"] == "techdebt"
+    assert store.count_sessions_in_flight() == 1
+
+
+def test_adopting_twice_records_one_session(store: FactStore, scope: ScopeConfig) -> None:
+    devin = FakeDevinClient(seed=3)
+    devin.foreign_sessions.append(_foreign("devin-foreign", ["fde:initiative=superset-scoreboard"]))
+    runner = Orchestrator(scope=_adopting(scope), store=store, devin=devin, dry_run=False)
+
+    runner.adopt()
+
+    assert runner.adopt() == []
+    assert len(store.query("SELECT task_id FROM fact_task")) == 1
+
+
+def test_a_session_outside_the_initiative_is_left_alone(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """The key can see the whole organisation; only this deployment's work is this deployment's."""
+    devin = FakeDevinClient(seed=3)
+    devin.foreign_sessions.append(_foreign("devin-unrelated", ["someone-elses-project"]))
+    runner = Orchestrator(scope=_adopting(scope), store=store, devin=devin, dry_run=False)
+
+    assert runner.adopt() == []
+    assert store.query("SELECT task_id FROM fact_task") == []
+
+
+def test_nothing_is_adopted_when_no_tag_claims_ownership(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    devin = FakeDevinClient(seed=3)
+    devin.foreign_sessions.append(_foreign("devin-foreign", ["fde:initiative=superset-scoreboard"]))
+    unclaimed = scope.model_copy(
+        update={"defaults": scope.defaults.model_copy(update={"adopt_session_tags": []})}
+    )
+    runner = Orchestrator(scope=unclaimed, store=store, devin=devin, dry_run=False)
+
+    assert runner.adopt() == []

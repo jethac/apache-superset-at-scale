@@ -228,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.command == "sync":
+        for session_id in orchestrator.adopt():
+            logging.info("adopted %s", session_id)
         moved = orchestrator.sync()
         for task_id, state in moved:
             logging.info("%s -> %s", task_id, state.value)
@@ -261,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
         while args.passes == 0 or passes < args.passes:
             started = time.monotonic()
             _intake(github, orchestrator, args.repo, args.since_days)
+            for session_id in orchestrator.adopt():
+                logging.info("adopted %s", session_id)
             for task_id, state in orchestrator.sync():
                 logging.info("%s -> %s", task_id, state.value)
             passes += 1

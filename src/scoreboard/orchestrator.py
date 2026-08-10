@@ -11,9 +11,9 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from .devin import DevinClient, SessionRequest
+from .devin import DevinClient, SessionRequest, SessionSummary
 from .github import assert_writable
-from .models import Decision, Event, Task, TaskState, make_task_id
+from .models import Decision, Event, EventType, Task, TaskState, make_task_id
 from .policy import PolicyConfig, Profile, Submission, evaluate, prompt_section
 from .scope import ScopeConfig
 from .store import FactStore
@@ -147,6 +147,32 @@ class Orchestrator:
             return True
         return self.store.count_sessions_in_flight() < limit
 
+    def adopt(self, now: datetime | None = None) -> list[str]:
+        """Record sessions this deployment did not start but is accountable for.
+
+        The fleet is not only what this process dispatched: a human, or another Devin working the
+        same backlog, starts sessions that spend the same ACUs against the same repository. A
+        roster that omits them reports a smaller fleet than the Devin app shows, and the first
+        person to notice is the reviewer. Ownership is claimed by tag, so adoption stays an
+        explicit configuration decision rather than a guess made from titles.
+        """
+        wanted = set(self.scope.defaults.adopt_session_tags)
+        if not wanted:
+            return []
+        moment = now or datetime.now(UTC)
+        known = self.store.known_session_ids()
+        adopted: list[str] = []
+
+        for summary in self.devin.list_sessions():
+            if summary.session_id in known or not wanted.intersection(summary.tags):
+                continue
+            task = _adopted_task(summary, self.scope.defaults.target_repo, moment)
+            self.store.upsert_task(task)
+            logger.info("adopted session %s (%s)", summary.session_id, summary.title)
+            adopted.append(summary.session_id)
+
+        return adopted
+
     def sync(self, now: datetime | None = None) -> list[tuple[str, TaskState]]:
         """Poll every started session and move the ones that have reached an outcome.
 
@@ -221,6 +247,48 @@ class Orchestrator:
             task.pr_is_draft = profile.contribution.open_as_draft
             return TaskState.DRAFT_AWAITING_AUTHORSHIP
         return task.state
+
+
+def _tag_value(tags: list[str], prefix: str) -> str | None:
+    for tag in tags:
+        if tag.startswith(prefix):
+            return tag[len(prefix) :]
+    return None
+
+
+def _adopted_task(summary: SessionSummary, target_repo: str, moment: datetime) -> Task:
+    """A task standing for a session started elsewhere, described by what the session carries.
+
+    There is no triggering event to point at, so the session itself is the event: its own tags
+    say which repository and trigger it came from where the dispatcher set them, and the reason
+    records that the row was adopted rather than routed, so the funnel cannot pass it off as
+    admitted work.
+    """
+    repo = _tag_value(summary.tags, "fde:source-repo=") or target_repo
+    trigger = _tag_value(summary.tags, "fde:trigger=")
+    event = Event(
+        event_id=summary.session_id,
+        event_type=EventType(trigger) if trigger in set(EventType) else EventType.SCHEDULE,
+        repo=repo,
+        title=summary.title,
+        created_at=summary.created_at or moment,
+        url=f"https://app.devin.ai/sessions/{summary.session_id}",
+    )
+    return Task(
+        task_id=make_task_id(event),
+        event=event,
+        decision=Decision(
+            admitted=True,
+            reason="adopted: session started outside this deployment",
+            stream=_tag_value(summary.tags, "fde:stream="),
+            target_repo=target_repo,
+            tags=summary.tags,
+        ),
+        state=TaskState.SESSION_STARTED,
+        session_id=summary.session_id,
+        created_at=event.created_at,
+        updated_at=moment,
+    )
 
 
 def _submission_from(pr_url: str, structured_output: dict[str, object] | None) -> Submission:

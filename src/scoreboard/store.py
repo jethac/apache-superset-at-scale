@@ -247,6 +247,14 @@ class FactStore:
             ).fetchone()
         return row is not None
 
+    def known_session_ids(self) -> set[str]:
+        """Every session the store has a task for, whoever started it."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT session_id FROM fact_task WHERE session_id IS NOT NULL"
+            ).fetchall()
+        return {str(row["session_id"]) for row in rows}
+
     def count_sessions_in_flight(self) -> int:
         with self._lock:
             row = self._connection.execute(
