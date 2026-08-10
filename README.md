@@ -46,32 +46,52 @@ approval click, so the queue collects the artifact the rule actually asks for;
 and the debt series treats a ruleset change as an instrument change and draws a
 break rather than a slope. Each is argued where it is implemented.
 
-## Try it in one command, with no credentials
+## Run it live
 
-The simulator runs the real code paths — real scope rules, real orchestrator,
-real fact store, real funnel arithmetic — against generated events and a fake
-Devin client. It needs no API keys and makes no network calls.
-
-```bash
-docker compose --profile demo run --rm simulate
-```
-
-Or without Docker:
+Four commands from a clean checkout to a Devin session the automation started
+by itself:
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/scoreboard simulate --events 48
+uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e ".[dev]"
+.venv/bin/scoreboard init                 # credentials, validated against live endpoints
+sed -i 's/^DRY_RUN=true/DRY_RUN=false/' .env
+.venv/bin/scoreboard intake --repo apache/superset --since-days 30
 ```
 
-You get the funnel, the Sankey edge list, and a `reconciles` flag. That flag is
-the point: it asserts
+What that last command does, per issue: normalise it, evaluate the scope rules,
+deduplicate against work already tracked, and for anything admitted, `POST
+/v1/sessions` to `api.devin.ai` with a prompt carrying the target project's
+contribution policy. A representative pass over `apache/superset`, 95 open
+issues read, one admitted:
+
+```
+INFO root apache/superset#42340 -> session_started (matched rule upstream-viz-plugin-work)
+INFO root apache/superset#42926 -> filtered (no matching rule)
+...
+```
+
+`scoreboard sync` then polls that session to its outcome. Neither step accepts
+a hand-written session id: the id in `fact_task.session_id` is whatever
+`api.devin.ai` returned, and `GET /v1/sessions/{id}` with your own key will show
+you the same session.
+
+The scheduled form of both is `scoreboard poll --repo jethac/superset --repo
+apache/superset --interval 300`, which is the `poller` service under
+`docker compose --profile live`. The webhook form is below.
+
+### The offline path is for tests, not for demonstrations
+
+`scoreboard simulate` runs the same scope rules, orchestrator, fact store and
+funnel arithmetic against generated events and a fake Devin client — no
+credentials, no network. It exists so CI can assert the invariant
 
 ```
 filtered + deduped + work_delivered + escalated + errored + in_flight == triggered
 ```
 
-so no task can be quietly lost between intake and outcome. It is checked in CI
-and the command exits non-zero if it ever fails.
+on every commit, and the command exits non-zero if it ever fails. It proves the
+arithmetic, not the integration; nothing it produces is evidence that the live
+path works.
 
 ## Configure it for real
 
@@ -79,15 +99,28 @@ and the command exits non-zero if it ever fails.
 scoreboard init
 ```
 
-The wizard prompts for a GitHub token and a Devin API key, validates both
-against live endpoints, asks which repository is the write target and which
-repositories are read for intake, and then does the check that is easy to
-forget: it asks Devin which repositories *Devin* can reach. GitHub granting you
-access and your Devin org's Git integration granting Devin access are two
+The wizard prompts for a GitHub token and a Devin API key, validates each
+against a live endpoint *separately*, asks which repository is the write target
+and which repositories are read for intake, and then does the check that is easy
+to forget: it asks Devin which repositories *Devin* can reach. GitHub granting
+you access and your Devin org's Git integration granting Devin access are two
 different things, and the second one usually fails later, when a session cannot
-clone. If the target is not in Devin's list the wizard says so and prints
-<https://app.devin.ai/settings/integrations> rather than letting you find out
-the hard way.
+clone.
+
+Separately is the operative word. Two secrets go into two masked prompts in a
+row, and the failure that actually happens is not an invalid key but the wrong
+one: paste the GitHub token into both and every Devin call returns 403, which
+reads exactly like a bad org id and sends you to the wrong settings page. So the
+key is checked on its own against `GET /v1/sessions` before anything that also
+depends on the org id, and an obvious `github_pat_…` in the Devin field is
+rejected without a request at all.
+
+The repository listing is reported but not blocking: `GET
+/v3beta1/organizations/{org}/repositories` wants an organisation-scoped key, and
+a user key that creates sessions perfectly well cannot enumerate the org. A 403
+there says nothing about whether Devin can clone, so the wizard says so and
+prints <https://app.devin.ai/settings/integrations> rather than failing setup on
+a question it is not entitled to answer.
 
 It writes `.env` with mode `0600` and updates the repository fields in
 `scope.yaml`. It never writes a secret into `scope.yaml`, the database, or an
@@ -97,8 +130,8 @@ image layer.
 
 | Variable | What it is |
 | --- | --- |
-| `DEVIN_API_KEY` | Devin service-user or personal API key (`cog_…`), sent as `Authorization: Bearer`. SSO governs webapp and org login; it is not the API credential. |
-| `DEVIN_ORG_ID` | Needed only for the org repository-listing check. |
+| `DEVIN_API_KEY` | Devin service-user or personal API key (`apk_user_…`), sent as `Authorization: Bearer`. SSO governs webapp and org login; it is not the API credential. |
+| `DEVIN_ORG_ID` | Needed only for the org repository-listing check, which is advisory. |
 | `GITHUB_TOKEN` | Read on every intake repository; write only on the fork. |
 | `WEBHOOK_SECRET` | HMAC secret for GitHub deliveries. Unset means *every* webhook is rejected. |
 | `DRY_RUN` | Default `true`: route and record, create no sessions. |
@@ -359,7 +392,11 @@ Worth stating plainly rather than being caught on:
   the full quality panel.
 - The trend series produced by `scoreboard simulate` are fixture data built on
   measured starting values. The measurements of `apache/superset` are real;
-  their movement over the simulated window is not a claim about the fork.
+  their movement over the simulated window is not a claim about the fork. Run
+  against a live database it charts collected facts instead.
+- The wizard cannot confirm Devin's Git integration with a user-scoped key, so
+  "Devin can clone the target" is asserted by the first live session rather than
+  by setup.
 - The CI-cost collector reads workflow jobs from the GitHub API and has been
   exercised against fixtures, not against a live token.
 - Throughput without a paired quality metric is trivially gamed by filing
