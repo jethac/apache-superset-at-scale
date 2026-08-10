@@ -92,6 +92,11 @@ def history(checkout: Path) -> list[Commit]:
     dates.
     """
     git = _git()
+    if _is_shallow(checkout):
+        raise RuntimeError(
+            "the checkout is a shallow clone, so there is no history to measure; "
+            "run `git fetch --unshallow` first"
+        )
     completed = subprocess.run(  # noqa: S603 - fixed argument list, no shell
         [git, "log", "--format=%H %aI"],
         cwd=checkout,
@@ -232,6 +237,23 @@ def _default_scanner(
     repo_path: Path, config: str, repo: str | None, measured_at: datetime | None
 ) -> list[DebtObservation]:
     return scan(repo_path, config=config, repo=repo, measured_at=measured_at)
+
+
+def _is_shallow(checkout: Path) -> bool:
+    """Whether the clone was truncated, which a walk of it would silently report as a short history.
+
+    A shallow clone answers `git log` with the handful of commits it holds, so a backfill over it
+    measures nothing and says it measured nothing — indistinguishable from a repository that has no
+    older commits. Refusing outright names the actual problem.
+    """
+    completed = subprocess.run(  # noqa: S603 - fixed argument list, no shell
+        [_git(), "rev-parse", "--is-shallow-repository"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout.strip() == "true"
 
 
 def _git() -> str:

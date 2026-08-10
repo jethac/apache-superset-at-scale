@@ -140,6 +140,15 @@ def test_history_is_ordered_by_author_date_newest_first(checkout: Path) -> None:
     ]
 
 
+def test_a_shallow_clone_is_refused_rather_than_measured(checkout: Path, tmp_path: Path) -> None:
+    """A truncated clone would report an empty backfill as success, so it is named instead."""
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "-q", "--depth", "1", checkout.as_uri(), str(shallow))
+
+    with pytest.raises(RuntimeError, match="shallow"):
+        history(shallow)
+
+
 def test_the_worktree_is_removed_even_when_the_body_raises(checkout: Path) -> None:
     """A reviewer's clone must be left exactly as it was found, failure or not."""
     oldest = history(checkout)[-1]
