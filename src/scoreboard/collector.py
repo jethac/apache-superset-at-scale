@@ -16,6 +16,37 @@ from .store import FactStore
 
 COHORT_AGENT = "agent"
 COHORT_HUMAN = "human"
+COHORT_DEPENDABOT = "dependabot"
+COHORT_UNATTRIBUTED = "unattributed"
+
+DEPENDABOT_LOGINS = frozenset({"dependabot[bot]", "dependabot-preview[bot]"})
+
+
+def cohort_for(pr_url: str, author: str, is_bot: bool, attributed: set[str]) -> str:
+    """Which cohort a pull request belongs to.
+
+    Attribution by PR URL is the only thing that proves *this* deployment produced a change, so
+    `agent` still requires it. What changed is where the rest goes. Sending everything
+    unattributable to `human` put machine-authored pull requests — Devin's own integration
+    account among them — into the cohort the comparison is measured against, which inflates the
+    baseline with the very work it is the control for. F10 calls agent-versus-contemporaneous-human
+    the comparison that survives scrutiny; it does not survive the agent being on both sides.
+
+    So a bot we cannot attribute lands in `unattributed`, which is F5's rule applied to pull
+    requests: work that cannot be attributed is named, not filed somewhere convenient. Dependabot
+    is split out because F10 lists it as its own cohort and its volume would swamp either bucket.
+
+    If you would rather claim every Devin-authored pull request as `agent` regardless of whether a
+    session can be pointed at, change the `COHORT_UNATTRIBUTED` below. That is a defensible
+    reading, but it asserts provenance from a username, and a skeptic can rename a bot.
+    """
+    if pr_url in attributed:
+        return COHORT_AGENT
+    if author in DEPENDABOT_LOGINS:
+        return COHORT_DEPENDABOT
+    if is_bot:
+        return COHORT_UNATTRIBUTED
+    return COHORT_HUMAN
 
 
 @dataclass
@@ -28,7 +59,7 @@ class Collector:
 
         Attribution is by PR URL against tasks already recorded by the orchestrator, so a PR is
         only counted as agent work if this deployment can point at the session that produced it.
-        Unattributable PRs fall to the human cohort rather than being claimed.
+        Everything else is sorted by authorship rather than swept into `human`; see `cohort_for`.
         """
         attributed = {
             str(row["pr_url"])
@@ -36,7 +67,7 @@ class Collector:
         }
         count = 0
         for fact in self.github.list_pull_requests(repo, since, until):
-            cohort = COHORT_AGENT if fact.pr_url in attributed else COHORT_HUMAN
+            cohort = cohort_for(fact.pr_url, fact.author, fact.is_bot, attributed)
             self.store.upsert_pull_request(fact, cohort)
             count += 1
         return count
