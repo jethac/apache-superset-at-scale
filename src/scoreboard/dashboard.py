@@ -485,18 +485,43 @@ def _fixed_ruleset_claim(points: Sequence[dict[str, object]]) -> dict[str, objec
     }
 
 
+MIN_PRS_FOR_A_MEDIAN = 3
+
+
 def _cost_claim(points: Sequence[dict[str, object]]) -> dict[str, object]:
-    if len(points) < 2:
-        return {"status": "no data", "detail": "not enough CI periods to show a direction yet"}
-    first = float(cast(float, points[0]["median_minutes_per_pr"]))
-    last = float(cast(float, points[-1]["median_minutes_per_pr"]))
+    """Direction of travel in CI minutes, over periods with enough pull requests to have one.
+
+    A period holding a single pull request has a median of that pull request, and one heavy
+    change against one light one reads as a 60% saving that nobody made. Periods below the
+    threshold stay on the chart, where the point count is visible, but are kept out of the verdict.
+    """
+    if not points:
+        return {"status": "no data", "detail": "no CI jobs have been collected yet"}
+    sampled = [point for point in points if int(cast(int, point["prs"])) >= MIN_PRS_FOR_A_MEDIAN]
+    if len(sampled) < 2:
+        thin = len(points) - len(sampled)
+        return {
+            "status": "not yet comparable",
+            "value": points[-1]["median_minutes_per_pr"] if points else 0,
+            "unit": "median minutes per PR",
+            "detail": (
+                f"only {len(sampled)} period(s) carry at least {MIN_PRS_FOR_A_MEDIAN} pull "
+                f"requests; a median of {thin} thinner period(s) would describe individual "
+                "changes rather than the toll a change pays"
+            ),
+        }
+    first = float(cast(float, sampled[0]["median_minutes_per_pr"]))
+    last = float(cast(float, sampled[-1]["median_minutes_per_pr"]))
     return {
         "status": _verdict(first, last, want_down=True),
         "value": last,
         "unit": "median minutes per PR",
         "from": first,
-        "since": points[0]["period_start"],
-        "detail": f"{first} to {last} median job-minutes billed per pull request",
+        "since": sampled[0]["period_start"],
+        "detail": (
+            f"{first} to {last} median job-minutes billed per pull request, over periods of at "
+            f"least {MIN_PRS_FOR_A_MEDIAN} pull requests"
+        ),
     }
 
 

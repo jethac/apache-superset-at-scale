@@ -74,6 +74,13 @@ def test_parse_jobs_skips_the_in_progress_job() -> None:
     assert integration.repo == REPO
 
 
+def test_a_gate_job_stamped_backwards_costs_nothing_rather_than_refunding_minutes() -> None:
+    """Skipped gate jobs come back with `completed_at` just before `started_at`."""
+    job = parse_jobs(FIXTURE, REPO)[0]
+    skipped = replace(job, completed_at=job.started_at - timedelta(seconds=4))
+    assert skipped.minutes == 0.0
+
+
 def test_record_jobs_is_idempotent(store: FactStore) -> None:
     jobs = jobs_for_pr(1, 500001, datetime(2026, 1, 5, tzinfo=UTC))
     record_jobs(store, jobs)

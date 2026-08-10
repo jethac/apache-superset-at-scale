@@ -8,7 +8,7 @@ only: stubbing them in `src` would leave a module that silently answers with inv
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -273,6 +273,25 @@ def test_the_debt_claim_never_compares_across_a_ruleset_change(
     assert "677" not in str(debt["detail"])
     assert cost["status"] == "improving"
     assert shipped["unit"] == "issues shipped"
+
+
+def test_the_cost_claim_ignores_a_period_holding_a_single_pull_request(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """One PR in a week is that PR's cost, not the week's, and a heavy one fakes a saving."""
+
+    def thin_then_real(store: FactStore, repo: str, period: str = "week") -> list[FakeCostPoint]:
+        return [replace(COST_POINTS[0], prs=1, median_minutes_per_pr=48.5), COST_POINTS[1]]
+
+    seed(store, scope)
+    throughput = throughput_payload(store, REPO, cost_series=thin_then_real)
+
+    _, cost, _ = thesis_payload(
+        store, REPO, throughput, debt_series=fake_debt_series, cost_series=thin_then_real
+    )
+
+    assert cost["status"] == "not yet comparable"
+    assert "48.5" not in str(cost["detail"])
 
 
 def test_a_claim_with_no_measurements_reads_as_unproven_rather_than_achieved() -> None:

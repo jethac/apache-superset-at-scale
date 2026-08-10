@@ -59,9 +59,15 @@ class JobRun:
 
     @property
     def minutes(self) -> float:
-        """Billable wall time. GitHub bills the job's elapsed time, so queueing is excluded."""
+        """Billable wall time. GitHub bills the job's elapsed time, so queueing is excluded.
+
+        A job that never ran — skipped by a conditional, or cancelled before it started — is
+        sometimes stamped with a `completed_at` fractionally before its `started_at`. Those
+        negatives are floored at zero rather than summed: a gate job that did no work bought no
+        minutes, and left signed it would quietly refund the workflows around it.
+        """
         elapsed = (self.completed_at - self.started_at).total_seconds() / 60.0
-        return round(elapsed, 1)
+        return round(max(elapsed, 0.0), 1)
 
 
 @dataclass(frozen=True)
