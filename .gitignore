@@ -1,0 +1,23 @@
+# Secrets must never be committed. The wizard writes .env; keep it local.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Data produced by the collector
+data/
+*.db
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
