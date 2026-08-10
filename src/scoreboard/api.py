@@ -148,7 +148,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             event = from_github(x_github_delivery or "unknown", x_github_event, payload)
         except UnsupportedEventError as error:
-            return {"accepted": False, "reason": str(error)}
+            # The detail names payload fields, so it belongs in the operator's log
+            # rather than in a response body an arbitrary sender can read.
+            logger.info("ignored delivery %s: %s", x_github_delivery, error)
+            return {"accepted": False, "reason": "unsupported event"}
 
         task = orchestrator.handle(event)
         return {

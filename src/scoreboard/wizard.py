@@ -97,9 +97,21 @@ def check_devin_repo_access(
 
 
 def write_env(values: dict[str, str], path: Path = ENV_PATH) -> None:
-    """Write secrets to a user-only-readable dotenv file."""
+    """Write secrets to a dotenv file that is user-only from the moment it exists.
+
+    Credentials live here and nowhere else: not in the fact store, not in an image
+    layer, not in the process table. The descriptor is opened with the restrictive
+    mode rather than chmod-ed afterwards, so there is no window in which another
+    local user can read the file.
+    """
     lines = [f"{key}={value}" for key, value in values.items() if value]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        stat.S_IRUSR | stat.S_IWUSR,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
     path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
