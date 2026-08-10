@@ -13,7 +13,9 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from . import cicost, debt
 from .config import Settings
+from .dashboard import build_router
 from .devin import FakeDevinClient, HttpDevinClient
 from .flow import funnel
 from .github import HttpGitHubClient
@@ -43,6 +45,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     scope = ScopeConfig.load(config.scope_path)
     policy = PolicyConfig.load(config.policy_path)
     store = FactStore(config.db_path)
+    # The trend tables are owned by their own modules, so a database written by an older
+    # version of the service still serves the dashboard rather than 500ing on a missing table.
+    debt.ensure_schema(store)
+    cicost.ensure_schema(store)
     github = HttpGitHubClient(config.github_token, config.github_api_url)
     devin = (
         HttpDevinClient(config.devin_api_key, config.devin_base_url, org_id=config.devin_org_id)
@@ -57,6 +63,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dry_run=config.dry_run,
         allow_upstream_write=config.allow_upstream_write,
     )
+
+    app.include_router(build_router(store, scope.defaults.target_repo))
 
     @app.get("/health")
     def health() -> dict[str, Any]:

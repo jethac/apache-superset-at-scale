@@ -104,3 +104,9 @@ def test_unknown_task_authorship_is_not_found(client: TestClient) -> None:
         json={"text": "words", "author": "jethac", "input_method": "dictated"},
     )
     assert response.status_code == 404
+
+
+def test_dashboard_is_mounted_and_serves_its_data(client: TestClient) -> None:
+    assert client.get("/dashboard").status_code == 200
+    payload = client.get("/dashboard/data").json()
+    assert set(payload) >= {"repo", "debt", "ci_cost", "flow", "funnel", "outbox"}

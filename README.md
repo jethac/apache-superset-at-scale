@@ -104,6 +104,8 @@ Then point a GitHub webhook at `POST /webhook/github` with content type
 | `GET /funnel` | Current funnel counts and reconciliation status. |
 | `GET /outbox` | Draft pull requests waiting on a human authorship paragraph. |
 | `POST /outbox/{task_id}/authorship` | Submit that paragraph and mark the draft ready. |
+| `GET /dashboard` | Operator page: debt and CI-cost trends, flow, funnel, outbox. |
+| `GET /dashboard/data` | The page's single JSON document, if you would rather read it raw. |
 | `GET /compliance` | Per-pull-request policy evidence: which checks ran, which passed. |
 | `POST /webhook/github` | Signed event intake. |
 
@@ -202,6 +204,44 @@ converging into shared outcome nodes. Facts live in SQLite (`fact_event`,
 `fact_task`, `fact_pr`, `snapshot_daily`) with natural-key upserts, so
 re-running a collection is idempotent.
 
+## The two trend lines
+
+Above the flow diagram the page carries two series, because "we shipped a lot"
+is not an outcome and neither is "CI is red less often".
+
+**Technical debt.** Superset already publishes a lint-debt dashboard, and it
+says 92 violations. Running the project's own configured rules says 1,470: the
+metrics uploader invokes `npx oxlint --format json` with no `--config`, and the
+project's config is `oxlint.json`, which is not oxlint's auto-discovered
+filename. 85 of the reported 92 are `no-unused-vars`, a rule that config sets to
+`off`. That is [issue #3](https://github.com/jethac/superset/issues/3) on the
+fork, and [#7](https://github.com/jethac/superset/issues/7) covers the `--quiet`
+flag that hides the rest.
+
+The published series also *appears* to fall, from 677 to 92. It does not. Every
+drop lines up with rules leaving the tracker: on 2026-05-13, fourteen rules
+tracked across 2,075 consecutive runs vanished at non-zero counts totalling 561.
+`react-hooks(exhaustive-deps)` disappeared at 238 and measures 381 today, having
+grown 60% while invisible to CI and to the dashboard alike.
+
+So [`debt.py`](src/scoreboard/debt.py) treats the measured rule set as the
+identity of the instrument. A point whose rule set differs from its predecessor
+is marked not comparable, the page draws a break with the entering and departing
+rules named, and `series_on_fixed_ruleset` omits — never zero-fills — a rule
+that was not measured. A line that slopes smoothly through an instrument change
+is the defect this replaces, not the product.
+
+**CI cost per pull request.** [`cicost.py`](src/scoreboard/cicost.py) records
+every job of every pull-request workflow run and reports the median
+compute-minutes a change had to buy, broken down by workflow. Measured on
+`apache/superset` that is roughly 170 minutes, of which `cypress-matrix` — two
+shards kept alive by the last two Cypress specs against 25 Playwright ones — is
+about 20. `savings_if_removed` computes that retirement rather than asserting
+it, which is what turns [issue #6](https://github.com/jethac/superset/issues/6)
+into a number a reader can check.
+
+Median, not mean: a couple of retried runs would otherwise decide the answer.
+
 ## Security model
 
 Assume the events are attacker-influenced: anyone can file an issue with any
@@ -263,8 +303,11 @@ Worth stating plainly rather than being caught on:
   runs and alert burn-down are in the data model and the PRD but not yet
   collected, so the reporting available today is the funnel and the flow, not
   the full quality panel.
-- The Superset dashboard layer is a follow-up; this repository produces the
-  facts it would read.
+- The trend series produced by `scoreboard simulate` are fixture data built on
+  measured starting values. The measurements of `apache/superset` are real;
+  their movement over the simulated window is not a claim about the fork.
+- The CI-cost collector reads workflow jobs from the GitHub API and has been
+  exercised against fixtures, not against a live token.
 - Throughput without a paired quality metric is trivially gamed by filing
   trivial pull requests. The PRD makes the pairing binding; do not report one
   without the other.

@@ -42,6 +42,10 @@ COPY --from=builder --chown=root:root /opt/venv /opt/venv
 WORKDIR /app
 COPY --chown=root:root scope.yaml ./scope.yaml
 COPY --chown=root:root policy.yaml ./policy.yaml
+# The simulator seeds the trend series from these; without them `simulate` in the
+# container would silently produce a page with no debt history.
+COPY --chown=root:root fixtures ./fixtures
+ENV FIXTURES_PATH=/app/fixtures
 
 USER scoreboard
 EXPOSE 8000

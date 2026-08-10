@@ -9,10 +9,12 @@ is the same code that runs in production.
 from __future__ import annotations
 
 import json
+import os
 import random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from . import cicost, debt
 from .devin import FakeDevinClient
 from .flow import build_edges, funnel, reconciles
 from .github import FakeGitHubClient, PullRequestFact
@@ -110,6 +112,113 @@ def _fixture_pull_requests(repo: str, agent_pr_urls: list[str]) -> list[PullRequ
     return facts
 
 
+# Installed as a wheel there is no repository root above the package, so the container points
+# at its own copy.
+FIXTURES = Path(os.environ.get("FIXTURES_PATH") or Path(__file__).resolve().parents[2] / "fixtures")
+
+# The rule set the demo trend is scoped to, with the counts measured under the project's own
+# config. Fixing the collector's missing --config changes what
+# is measured, so a total-over-time line spanning that change is meaningless; these are the rules
+# present on both sides of it.
+DEMO_RULESET = {
+    "react-hooks(exhaustive-deps)": 381,
+    "react(jsx-key)": 80,
+    "react-hooks(rules-of-hooks)": 47,
+}
+
+# Per-job medians measured on apache/superset, in minutes. cypress-matrix is the two shards the
+# last two Cypress specs keep alive.
+DEMO_CI_JOBS = (
+    ("Python-Integration", "test-postgres", 19.4),
+    ("Python-Integration", "test-mysql", 22.2),
+    ("Python-Unit", "unit-tests (current)", 23.1),
+    ("E2E", "playwright-tests (chromium)", 14.2),
+    ("E2E", "cypress-matrix (1)", 10.1),
+    ("E2E", "cypress-matrix (2)", 10.2),
+    ("Docker images", "docker-build (dev)", 8.2),
+    ("pre-commit", "pre-commit", 4.9),
+)
+CYPRESS_RETIRED_AFTER_WEEK = 6
+
+
+def _seed_trends(store: FactStore, repo: str, weeks: int = 12) -> None:
+    """Seed the two trend series the operator page draws above the flow.
+
+    The counts and job durations are the ones measured on `apache/superset`; their movement over
+    the simulated window is fixture data, not a claim about the fork. The history import is
+    included because the instrument change it contains — fourteen rules leaving the tracker at
+    non-zero counts — is the thing the page has to render as a break rather than an improvement.
+    """
+    debt.ingest_csv(store, FIXTURES / "debt-history.csv")
+    cicost.ensure_schema(store)
+
+    start = datetime.now(UTC) - timedelta(weeks=weeks)
+    # What the collector reported before it was told which config to use: oxlint's defaults,
+    # dominated by a rule the project sets to off. The next point measures the project's own
+    # rules, so the two are not on the same instrument and the page must break the line there.
+    unconfigured = {
+        "eslint(no-unused-vars)": 85,
+        "oxc(erasing-op)": 2,
+        "eslint(no-control-regex)": 2,
+    }
+    observations_before = [
+        debt.DebtObservation(
+            measured_at=start - timedelta(weeks=1),
+            repo=repo,
+            commit_sha="0" * 40,
+            config_path="",
+            ruleset_id=debt.ruleset_id(unconfigured),
+            rule=rule,
+            count=count,
+        )
+        for rule, count in unconfigured.items()
+    ]
+    counts = dict(DEMO_RULESET)
+    observations: list[debt.DebtObservation] = list(observations_before)
+    jobs: list[cicost.JobRun] = []
+    for week in range(weeks):
+        day = start + timedelta(weeks=week)
+        identity = debt.ruleset_id(counts)
+        observations.extend(
+            debt.DebtObservation(
+                measured_at=day,
+                repo=repo,
+                commit_sha=f"{week:040x}",
+                config_path="oxlint.json",
+                ruleset_id=identity,
+                rule=rule,
+                count=count,
+            )
+            for rule, count in counts.items()
+        )
+        counts = {
+            rule: max(0, count - (12 if "exhaustive" in rule else 3))
+            for rule, count in counts.items()
+        }
+
+        for pr in range(4):
+            for workflow, job, minutes in DEMO_CI_JOBS:
+                if job.startswith("cypress-matrix") and week >= CYPRESS_RETIRED_AFTER_WEEK:
+                    continue
+                started = day + timedelta(hours=pr)
+                jobs.append(
+                    cicost.JobRun(
+                        run_id=week * 100 + pr,
+                        repo=repo,
+                        workflow=workflow,
+                        job=job,
+                        pr_number=week * 100 + pr,
+                        head_sha=f"{week:040x}",
+                        started_at=started,
+                        completed_at=started + timedelta(minutes=minutes),
+                        conclusion="success",
+                    )
+                )
+
+    debt.record_run(store, observations)
+    cicost.record_jobs(store, jobs)
+
+
 def run_simulation(
     scope_path: Path,
     policy_path: Path,
@@ -145,6 +254,7 @@ def run_simulation(
     collector = Collector(github=github, store=store)
     now = datetime.now(UTC)
     collected = collector.collect_pull_requests("jethac/superset", now - timedelta(days=90), now)
+    _seed_trends(store, scope.defaults.target_repo)
 
     counts = funnel(store)
     edges = build_edges(store)
