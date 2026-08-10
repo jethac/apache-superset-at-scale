@@ -59,7 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     poll.add_argument("--repo", action="append", required=True)
     poll.add_argument("--since-days", type=int, default=30)
-    poll.add_argument("--interval", type=int, default=300, help="seconds between passes")
+    poll.add_argument("--interval", type=int, default=60, help="seconds between passes")
     poll.add_argument("--passes", type=int, default=0, help="stop after N passes; 0 runs forever")
 
     collect = subparsers.add_parser("collect", help="collect PR facts for a window")
@@ -259,13 +259,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "poll":
         passes = 0
         while args.passes == 0 or passes < args.passes:
+            started = time.monotonic()
             _intake(github, orchestrator, args.repo, args.since_days)
             for task_id, state in orchestrator.sync():
                 logging.info("%s -> %s", task_id, state.value)
             passes += 1
             if args.passes and passes >= args.passes:
                 break
-            time.sleep(args.interval)
+            # The interval is the period between passes, not the gap after one. A pass that reads
+            # two repositories and syncs a fleet takes tens of seconds, so sleeping the full
+            # interval on top of it would quietly halve the polling rate the operator asked for.
+            time.sleep(max(0.0, args.interval - (time.monotonic() - started)))
         return 0
 
     if args.command == "measure":

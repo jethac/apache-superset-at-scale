@@ -55,7 +55,7 @@ services:
       - poll
       - --repo=jethac/superset
       - --repo=apache/superset
-      - --interval=300
+      - --interval=60
     volumes:
       - facts:/data
       - ./scope.yaml:/app/scope.yaml:ro

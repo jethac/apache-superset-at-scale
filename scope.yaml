@@ -12,6 +12,10 @@ version: 1
 defaults:
   target_repo: jethac/superset
   max_acu_limit: 10
+  # How many sessions may run at once. Admitted work over the limit waits and is dispatched by a
+  # later intake pass, so a backlog filed in one afternoon does not become that many concurrent
+  # sessions — and that many ACUs — in the same minute.
+  max_concurrent_sessions: 3
   tags:
     - fde:initiative=superset-scoreboard
 
@@ -46,6 +50,19 @@ rules:
       exclude_bots: true
     then:
       stream: bugfix
+
+  - id: fork-backlog
+    description: >-
+      Any other issue on the fork. The fork is this deployment's own backlog: everything filed
+      there was filed to be worked, including by the automation itself, which is why this rule
+      does not exclude bot authors as the upstream rules do. Dependency bumps are excluded because
+      Dependabot opens pull requests for those directly and a session would duplicate them.
+    when:
+      repo: [jethac/superset]
+      event_type: [issue]
+      labels_none: ["dependencies", "duplicate", "wontfix", "#WIP"]
+    then:
+      stream: techdebt
 
   - id: upstream-well-specified-bug
     description: >-

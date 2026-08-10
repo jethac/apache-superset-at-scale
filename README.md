@@ -100,7 +100,7 @@ a hand-written session id: the id in `fact_task.session_id` is whatever
 you the same session.
 
 The scheduled form of both is `scoreboard poll --repo jethac/superset --repo
-apache/superset --interval 300`, which is the `poller` service under
+apache/superset --interval 60`, which is the `poller` service under
 `docker compose --profile live`. The webhook form is below.
 
 ### The offline path is for tests, not for demonstrations
@@ -225,7 +225,7 @@ no-action-needed, escalation, or failure — recording ACUs and grading the resu
 against the contribution policy on the way. Without it the funnel would report
 what was true at launch and `in_flight` could only grow.
 
-`scoreboard poll --repo jethac/superset --repo apache/superset --interval 300`
+`scoreboard poll --repo jethac/superset --repo apache/superset --interval 60`
 is the two together on a timer, and is the `poller` service in
 `docker-compose.yml` (`--profile live`). That is the scheduled trigger: webhooks
 cover what GitHub pushes to us, the poller covers what it does not — upstream
@@ -256,6 +256,14 @@ edit rather than an emergent accident.
 Conditions: `repo`, `event_type`, `labels_any`, `labels_none`, `title_regex`,
 `severity_min`, `age_days_min`, `age_days_max`, `exclude_bots`. Routing:
 `stream`, `target_repo`, `playbook_id`, `max_acu_limit`, `tags`.
+
+**Admitted is not the same as dispatched.** `defaults.max_concurrent_sessions`
+caps how many sessions run at once; admitted work over the cap keeps its verdict
+and waits, and a later intake pass starts it when the fleet has room. A backlog
+filed in one afternoon therefore costs its ACUs at a rate a human can still
+intervene in. Routing is also re-evaluated on every sighting of work that has
+not started yet, so widening a rule picks up issues that were already seen and
+filtered — a rule edit does not need a database edit to take effect.
 
 **Upstream is read-only.** We read `apache/superset` issues; the resulting pull
 request is opened on the fork. `assert_writable` refuses any upstream target

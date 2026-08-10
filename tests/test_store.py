@@ -28,7 +28,7 @@ def test_a_filtered_task_overwritten_by_an_old_intake_is_restored_on_open(
     path = tmp_path / "facts.db"
     store = FactStore(path)
     runner = Orchestrator(scope=scope, store=store, devin=FakeDevinClient(seed=1))
-    task = runner.handle(make_event(labels=["question"], number=41))
+    task = runner.handle(make_event(repo="apache/superset", labels=["question"], number=41))
     assert task.state is TaskState.FILTERED
     _corrupt(path, task.task_id)
 

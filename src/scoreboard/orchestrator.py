@@ -66,14 +66,19 @@ class Orchestrator:
 
         if self.store.task_exists(task_id):
             self.store.record_duplicate_sighting(task_id)
-            return Task(
-                task_id=task_id,
-                event=event,
-                decision=Decision(admitted=False, reason="duplicate of an existing task"),
-                state=TaskState.DEDUPED,
-                created_at=moment,
-                updated_at=moment,
-            )
+            # Only work that already has a session is a settled duplicate. Anything else is
+            # re-routed against the current rules from the event just read, so a rule widened
+            # after an issue was first seen picks that issue up, and work admitted while the
+            # fleet was full is dispatched once there is room.
+            if self.store.task_has_started(task_id):
+                return Task(
+                    task_id=task_id,
+                    event=event,
+                    decision=Decision(admitted=False, reason="duplicate of an existing task"),
+                    state=TaskState.DEDUPED,
+                    created_at=moment,
+                    updated_at=moment,
+                )
 
         decision = self.scope.route(event, moment)
         task = Task(
@@ -102,6 +107,13 @@ class Orchestrator:
             self.store.upsert_task(task)
             return task
 
+        if not self._has_dispatch_capacity():
+            task.decision = decision.model_copy(
+                update={"reason": f"{decision.reason} (queued: the fleet is at capacity)"}
+            )
+            self.store.upsert_task(task)
+            return task
+
         state = self.devin.create_session(
             SessionRequest(
                 prompt=build_prompt(event, decision, profile),
@@ -121,6 +133,19 @@ class Orchestrator:
 
         self.store.upsert_task(task)
         return task
+
+    def _has_dispatch_capacity(self) -> bool:
+        """Whether another session may start, given how many are already running.
+
+        Admitting work and paying for it are separate acts. Without this, a backlog filed in one
+        afternoon becomes that many concurrent sessions and that many ACUs in the same minute,
+        which is neither reviewable by a human nor recoverable if the routing was wrong. Work over
+        the limit stays admitted and waits; intake's next pass dispatches it.
+        """
+        limit = self.scope.defaults.max_concurrent_sessions
+        if limit is None:
+            return True
+        return self.store.count_sessions_in_flight() < limit
 
     def sync(self, now: datetime | None = None) -> list[tuple[str, TaskState]]:
         """Poll every started session and move the ones that have reached an outcome.
