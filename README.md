@@ -1,4 +1,4 @@
-# FDE deployment scoreboard
+# Devin @ apache/superset
 
 An event-driven Devin automation for the Superset fork, plus the reporting layer
 that makes its effect auditable.

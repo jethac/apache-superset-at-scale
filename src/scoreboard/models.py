@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -144,3 +145,16 @@ def digest_payload(payload: dict[str, Any]) -> str:
     """Content digest of the raw payload, for audit without storing attacker-controlled text."""
     canonical = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class WorkflowRunRef:
+    """The part of a workflow run needed to attribute its jobs to a pull request.
+
+    Shared by the GitHub client that reads runs and the collector that prices them, so it lives
+    here rather than in either of them.
+    """
+
+    run_id: int
+    pr_number: int | None
+    head_sha: str

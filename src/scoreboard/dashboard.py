@@ -17,8 +17,9 @@ as an argument, which is what the unit tests inject.
 from __future__ import annotations
 
 import importlib
+import sqlite3
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -170,6 +171,250 @@ def ci_cost_payload(
     ]
 
 
+SESSION_URL = "https://app.devin.ai/sessions/"
+
+
+def fleet_payload(store: FactStore) -> list[dict[str, object]]:
+    """Every Devin session this deployment has started, running ones first.
+
+    A reviewer opens this page long after the run, so the fleet cannot be only what is in flight:
+    a page showing an empty roster because the work already finished would be indistinguishable
+    from one showing an automation that never started anything. Finished sessions therefore stay
+    on the roster with their outcome, and each row links back to the session in the Devin app so
+    the transcript is one click away rather than a claim made here.
+    """
+    rows = store.query(
+        "SELECT task_id, session_id, repo, target_repo, stream, state, pr_url, acus_consumed,"
+        " created_at, updated_at FROM fact_task WHERE session_id IS NOT NULL"
+        " ORDER BY (state = 'session_started') DESC, updated_at DESC"
+    )
+    return [
+        {
+            "task_id": str(row["task_id"]),
+            "session_id": str(row["session_id"]),
+            "session_url": SESSION_URL + str(row["session_id"]).removeprefix("devin-"),
+            "repo": str(row["repo"]),
+            "target_repo": str(row["target_repo"]),
+            "stream": str(row["stream"] or "unrouted"),
+            "state": str(row["state"]),
+            "running": str(row["state"]) == "session_started",
+            "pr_url": row["pr_url"],
+            "acus_consumed": row["acus_consumed"],
+            "started_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+        for row in rows
+    ]
+
+
+SETTLED_STATES = ("work_delivered", "draft_awaiting_authorship", "escalated", "errored")
+DELIVERED_STATES = ("work_delivered", "draft_awaiting_authorship")
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def throughput_payload(
+    store: FactStore, repo: str, cost_series: CostSeriesFn | None = None
+) -> dict[str, object]:
+    """Is it working, and at what rate — answered from the same facts the flow is drawn from.
+
+    Two numbers a reviewer actually argues about live here. The first is the delivery rate: of the
+    sessions that have settled, how many produced a pull request rather than an escalation or an
+    error. Sessions still running are excluded from the denominator rather than counted as
+    failures, because a running session is not yet evidence either way. The second is cost: ACUs
+    spent per delivered pull request, set against the CI minutes each pull request costs the
+    project. Both are reported as `None` when the facts do not support them, since a plausible
+    zero is worse than an admitted gap.
+    """
+    rows = store.query(
+        "SELECT state, pr_url, acus_consumed, created_at, updated_at FROM fact_task"
+        " WHERE session_id IS NOT NULL"
+    )
+    states = [str(row["state"]) for row in rows]
+    started = len(rows)
+    settled = [row for row in rows if str(row["state"]) in SETTLED_STATES]
+    delivered = [row for row in rows if str(row["state"]) in DELIVERED_STATES]
+    acus = [float(row["acus_consumed"]) for row in rows if row["acus_consumed"] is not None]
+    hours = [
+        (
+            datetime.fromisoformat(str(row["updated_at"]))
+            - datetime.fromisoformat(str(row["created_at"]))
+        ).total_seconds()
+        / 3600
+        for row in delivered
+    ]
+    cost_points = ci_cost_payload(store, repo, series=cost_series)
+    minutes_per_pr = cost_points[-1]["median_minutes_per_pr"] if cost_points else None
+    prs = len([row for row in rows if row["pr_url"]])
+    median_hours = _median(hours)
+
+    return {
+        "sessions_started": started,
+        "in_flight": states.count("session_started"),
+        "delivered": len(delivered),
+        "escalated": states.count("escalated"),
+        "errored": states.count("errored"),
+        "pull_requests": prs,
+        "delivery_rate": round(len(delivered) / len(settled), 3) if settled else None,
+        "median_hours_to_delivery": round(median_hours, 2) if median_hours is not None else None,
+        "acus_total": round(sum(acus), 2) if acus else None,
+        "acus_per_delivered_pr": (
+            round(sum(acus) / len(delivered), 2) if acus and delivered else None
+        ),
+        "ci_minutes_per_pr": minutes_per_pr,
+        "ci_minutes_committed": (
+            round(prs * float(cast(float, minutes_per_pr)), 1) if minutes_per_pr and prs else None
+        ),
+        "daily": _daily_throughput(rows),
+    }
+
+
+def _daily_throughput(rows: Sequence[sqlite3.Row]) -> list[dict[str, object]]:
+    """Sessions started and pull requests delivered per day, oldest first."""
+    started: dict[str, int] = {}
+    delivered: dict[str, int] = {}
+    for row in rows:
+        started[str(row["created_at"])[:10]] = started.get(str(row["created_at"])[:10], 0) + 1
+        if str(row["state"]) in DELIVERED_STATES:
+            day = str(row["updated_at"])[:10]
+            delivered[day] = delivered.get(day, 0) + 1
+    return [
+        {"day": day, "started": started.get(day, 0), "delivered": delivered.get(day, 0)}
+        for day in sorted(set(started) | set(delivered))
+    ]
+
+
+def _verdict(first: float, last: float, want_down: bool) -> str:
+    """`improving`, `worsening` or `flat` — never a bare arrow, which reads as opinion."""
+    if first == last:
+        return "flat"
+    fell = last < first
+    return "improving" if fell is want_down else "worsening"
+
+
+def _debt_claim(points: Sequence[dict[str, object]]) -> dict[str, object]:
+    """Debt is only compared across points the measurement itself calls comparable.
+
+    The series contains a rule-set change, so the first and last totals are measurements of
+    different things. Taking the newest run of comparable points keeps the claim true; a
+    first-to-last delta across the break would report rule removals as debt paid, which is the
+    exact defect this deployment was built to stop repeating.
+    """
+    if not points:
+        return {"status": "no data", "detail": "no oxlint measurements ingested yet"}
+    run: list[dict[str, object]] = []
+    for point in points:
+        if point["comparable_to_previous"] is False:
+            run = []
+        run.append(point)
+    if len(run) < 2:
+        return {
+            "status": "not yet comparable",
+            "value": run[-1]["total"],
+            "unit": "violations",
+            "detail": (
+                "only one measurement since the rule set last changed, so there is nothing "
+                "honest to compare it against yet"
+            ),
+        }
+    first = float(cast(float, run[0]["total"]))
+    last = float(cast(float, run[-1]["total"]))
+    return {
+        "status": _verdict(first, last, want_down=True),
+        "value": last,
+        "unit": "violations",
+        "from": first,
+        "since": run[0]["measured_at"],
+        "detail": (
+            f"{int(first)} to {int(last)} across {len(run)} comparable measurements of the "
+            "project's configured rule set"
+        ),
+    }
+
+
+def _cost_claim(points: Sequence[dict[str, object]]) -> dict[str, object]:
+    if len(points) < 2:
+        return {"status": "no data", "detail": "not enough CI periods to show a direction yet"}
+    first = float(cast(float, points[0]["median_minutes_per_pr"]))
+    last = float(cast(float, points[-1]["median_minutes_per_pr"]))
+    return {
+        "status": _verdict(first, last, want_down=True),
+        "value": last,
+        "unit": "median minutes per PR",
+        "from": first,
+        "since": points[0]["period_start"],
+        "detail": f"{first} to {last} median job-minutes billed per pull request",
+    }
+
+
+def _shipped_claim(daily: Sequence[dict[str, object]], delivered: int) -> dict[str, object]:
+    """Shipping rate compares the two halves of the run rather than day to day.
+
+    A day-over-day comparison of a fleet that dispatches in bursts is noise, and reporting noise as
+    a trend is how a dashboard stops being believed.
+    """
+    if not delivered:
+        return {
+            "status": "no data",
+            "value": 0,
+            "unit": "issues shipped",
+            "detail": "no pull request has been delivered yet",
+        }
+    half = len(daily) // 2
+    early = sum(int(cast(int, day["delivered"])) for day in daily[:half])
+    late = sum(int(cast(int, day["delivered"])) for day in daily[half:])
+    status = "improving" if late > early else _verdict(early, late, want_down=False)
+    return {
+        "status": status if half else "too early",
+        "value": delivered,
+        "unit": "issues shipped",
+        "from": early,
+        "since": daily[0]["day"] if daily else None,
+        "detail": f"{delivered} pull requests delivered across {len(daily)} days of dispatch",
+    }
+
+
+def thesis_payload(
+    store: FactStore,
+    repo: str,
+    throughput: dict[str, object],
+    debt_series: DebtSeriesFn | None = None,
+    cost_series: CostSeriesFn | None = None,
+) -> list[dict[str, object]]:
+    """The three claims the deployment is making, each with the evidence that settles it.
+
+    The page leads with these because a reviewer's first question is not "what does the fleet do"
+    but "is any of this working". Each claim carries its own status, including `no data`, so a
+    claim with nothing behind it looks unproven rather than achieved.
+    """
+    daily = cast(Sequence[dict[str, object]], throughput["daily"])
+    return [
+        {
+            "goal": "Technical debt falls",
+            "measure": "oxlint violations under the project's configured rule set",
+            **_debt_claim(debt_payload(store, repo, series=debt_series)),
+        },
+        {
+            "goal": "CI compute per pull request falls",
+            "measure": "median billed job-minutes per pull request",
+            **_cost_claim(ci_cost_payload(store, repo, series=cost_series)),
+        },
+        {
+            "goal": "More issues ship",
+            "measure": "pull requests delivered by the fleet",
+            **_shipped_claim(daily, int(cast(int, throughput["delivered"]))),
+        },
+    ]
+
+
 def flow_payload(store: FactStore) -> list[dict[str, object]]:
     """Sankey edges, stream-tagged so the diagram can colour by work stream."""
     return [
@@ -207,11 +452,18 @@ def dashboard_payload(
     cost_series: CostSeriesFn | None = None,
 ) -> dict[str, object]:
     """One document per page load: the page makes exactly one request and draws from it."""
+    throughput = throughput_payload(store, repo, cost_series=cost_series)
     return {
         "repo": repo,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "thesis": thesis_payload(
+            store, repo, throughput, debt_series=debt_series, cost_series=cost_series
+        ),
         "debt": debt_payload(store, repo, series=debt_series),
         "ci_cost": ci_cost_payload(store, repo, series=cost_series),
+        "throughput": throughput,
         "flow": flow_payload(store),
+        "fleet": fleet_payload(store),
         "funnel": funnel_payload(store),
         "outbox": outbox_payload(store),
     }

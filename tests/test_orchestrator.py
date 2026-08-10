@@ -43,6 +43,23 @@ def test_redelivery_is_deduped_rather_than_spawning_a_second_session(
     assert len(runner.devin.sessions) == 1  # type: ignore[union-attr]
 
 
+def test_a_resighting_never_overwrites_the_state_of_the_work_it_duplicates(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """Intake sees the same open issue every poll; a running session must survive that."""
+    runner = orchestrator(store, scope, dry_run=False)
+    event = make_event(labels=["bug"])
+    started = runner.handle(event)
+    runner.handle(event)
+    runner.handle(event)
+
+    row = store.query("SELECT state, session_id, dedupe_hits FROM fact_task")[0]
+    assert row["state"] == started.state.value
+    assert row["session_id"] == started.session_id
+    assert row["dedupe_hits"] == 2
+    assert funnel(store)["deduped"] == 2
+
+
 def test_filtered_event_never_reaches_the_devin_client(
     store: FactStore, scope: ScopeConfig
 ) -> None:

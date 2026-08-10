@@ -65,7 +65,8 @@ class Orchestrator:
         task_id = make_task_id(event)
 
         if self.store.task_exists(task_id):
-            task = Task(
+            self.store.record_duplicate_sighting(task_id)
+            return Task(
                 task_id=task_id,
                 event=event,
                 decision=Decision(admitted=False, reason="duplicate of an existing task"),
@@ -73,8 +74,6 @@ class Orchestrator:
                 created_at=moment,
                 updated_at=moment,
             )
-            self.store.upsert_task(task)
-            return task
 
         decision = self.scope.route(event, moment)
         task = Task(

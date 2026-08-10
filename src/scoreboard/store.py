@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS fact_task (
     pr_is_draft    INTEGER NOT NULL DEFAULT 0,
     policy_profile TEXT,
     acus_consumed  REAL,
+    dedupe_hits    INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
@@ -113,7 +114,18 @@ class FactStore:
         self._lock = threading.Lock()
         with self._lock:
             self._connection.executescript(SCHEMA)
+            self._migrate()
             self._connection.commit()
+
+    def _migrate(self) -> None:
+        """Additive column adds for stores created by an earlier schema."""
+        columns = {
+            str(row["name"]) for row in self._connection.execute("PRAGMA table_info(fact_task)")
+        }
+        if "dedupe_hits" not in columns:
+            self._connection.execute(
+                "ALTER TABLE fact_task ADD COLUMN dedupe_hits INTEGER NOT NULL DEFAULT 0"
+            )
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
@@ -181,6 +193,19 @@ class FactStore:
                     task.created_at.isoformat(),
                     task.updated_at.isoformat(),
                 ),
+            )
+
+    def record_duplicate_sighting(self, task_id: str) -> None:
+        """Count a re-sighting without touching the task it duplicates.
+
+        Intake sees the same open issue on every poll. Writing a `deduped` task for each one would
+        overwrite the state of work already in flight, so a session started an hour ago would read
+        as deduped intake — the roster and the funnel would then disagree with the Devin app. The
+        sighting is a property of intake volume, so it is counted as one.
+        """
+        with self._tx() as connection:
+            connection.execute(
+                "UPDATE fact_task SET dedupe_hits = dedupe_hits + 1 WHERE task_id = ?", (task_id,)
             )
 
     def task_exists(self, task_id: str) -> bool:

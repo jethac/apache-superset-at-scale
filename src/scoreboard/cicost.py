@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from statistics import median
 from typing import Literal, Protocol
 
+from .models import WorkflowRunRef
 from .store import FactStore
 
 SCHEMA = """
@@ -78,15 +79,6 @@ class CostPoint:
     prs: int
     median_minutes_per_pr: float
     by_workflow: list[WorkflowCost]
-
-
-@dataclass(frozen=True)
-class WorkflowRunRef:
-    """The part of a workflow run needed to attribute its jobs to a pull request."""
-
-    run_id: int
-    pr_number: int | None
-    head_sha: str
 
 
 class WorkflowRunSource(Protocol):
@@ -210,17 +202,27 @@ def record_jobs(store: FactStore, jobs: Sequence[JobRun]) -> None:
 
 
 def collect(
-    github: WorkflowRunSource, store: FactStore, repo: str, since: datetime, until: datetime
+    github: WorkflowRunSource,
+    store: FactStore,
+    repo: str,
+    since: datetime,
+    until: datetime,
+    max_runs: int | None = None,
 ) -> int:
     """Record the jobs of every pull-request workflow run in a window; return rows written.
 
     The pull request number comes from the run, not from the jobs payload, which does not carry
     it. Runs GitHub cannot attribute to a pull request are still recorded, with a null number, so
     the table stays a faithful account of what the runners did.
+
+    `max_runs` bounds the walk for repositories that run thousands of jobs a day: each run costs
+    an API call, and the figure this feeds is a median, which a bounded sample of the window
+    estimates without reading every run.
     """
     ensure_schema(store)
     written = 0
-    for run in github.list_pull_request_runs(repo, since, until):
+    runs = github.list_pull_request_runs(repo, since, until)
+    for run in runs[:max_runs] if max_runs else runs:
         jobs = [
             replace(job, pr_number=run.pr_number, head_sha=job.head_sha or run.head_sha)
             for job in parse_jobs(github.get_run_jobs(repo, run.run_id), repo)

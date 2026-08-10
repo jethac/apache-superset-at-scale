@@ -47,7 +47,9 @@ _TERMINALS: dict[TaskState, str] = {
 
 
 def build_edges(store: FactStore) -> list[FlowEdge]:
-    rows = store.query("SELECT repo, COALESCE(stream, 'unrouted') AS stream, state FROM fact_task")
+    rows = store.query(
+        "SELECT repo, COALESCE(stream, 'unrouted') AS stream, state, dedupe_hits FROM fact_task"
+    )
     counts: Counter[tuple[str, str, str]] = Counter()
 
     for row in rows:
@@ -55,6 +57,13 @@ def build_edges(store: FactStore) -> list[FlowEdge]:
         state = TaskState(row["state"])
         source_node = f"{row['repo']}"
         counts[(stream, source_node, NODE_INTAKE)] += 1
+
+        # Re-sightings of the same issue enter intake again and leave as deduped; the work they
+        # duplicate keeps its own ribbon.
+        hits = int(row["dedupe_hits"])
+        if hits:
+            counts[(stream, source_node, NODE_INTAKE)] += hits
+            counts[(stream, NODE_INTAKE, NODE_DEDUPED)] += hits
 
         if state is TaskState.FILTERED:
             counts[(stream, NODE_INTAKE, NODE_FILTERED)] += 1
@@ -75,15 +84,16 @@ def build_edges(store: FactStore) -> list[FlowEdge]:
 def funnel(store: FactStore) -> dict[str, int]:
     rows = store.query("SELECT state, COUNT(*) AS n FROM fact_task GROUP BY state")
     by_state = {str(row["state"]): int(row["n"]) for row in rows}
+    hits = int(store.query("SELECT COALESCE(SUM(dedupe_hits), 0) AS n FROM fact_task")[0]["n"])
     admitted = sum(
         count
         for state, count in by_state.items()
         if state not in {TaskState.FILTERED.value, TaskState.DEDUPED.value}
     )
     return {
-        "triggered": sum(by_state.values()),
+        "triggered": sum(by_state.values()) + hits,
         "filtered": by_state.get(TaskState.FILTERED.value, 0),
-        "deduped": by_state.get(TaskState.DEDUPED.value, 0),
+        "deduped": by_state.get(TaskState.DEDUPED.value, 0) + hits,
         "admitted": admitted,
         "work_delivered": by_state.get(TaskState.WORK_DELIVERED.value, 0),
         "awaiting_authorship": by_state.get(TaskState.DRAFT_AWAITING_AUTHORSHIP.value, 0),

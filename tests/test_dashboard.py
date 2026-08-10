@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi import FastAPI
@@ -23,9 +24,12 @@ from scoreboard.dashboard import (
     ci_cost_payload,
     dashboard_payload,
     debt_payload,
+    fleet_payload,
     flow_payload,
     funnel_payload,
     outbox_payload,
+    thesis_payload,
+    throughput_payload,
 )
 from scoreboard.devin import FakeDevinClient
 from scoreboard.models import TaskState
@@ -188,6 +192,78 @@ def test_flow_and_funnel_payloads_come_from_the_fact_store(
     )
 
 
+def test_the_fleet_keeps_finished_sessions_and_puts_running_ones_first(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """A reviewer arrives after the run, so a roster of only in-flight work would read as empty."""
+    seed(store, scope)
+
+    sessions = fleet_payload(store)
+
+    assert sessions
+    assert all(session["session_id"] for session in sessions)
+    running = [index for index, s in enumerate(sessions) if s["running"]]
+    finished = [index for index, s in enumerate(sessions) if not s["running"]]
+    assert not (running and finished) or max(running) < min(finished)
+    assert any(not session["running"] for session in sessions)
+    for session in sessions:
+        assert session["session_url"].startswith("https://app.devin.ai/sessions/")
+        assert "devin-" not in session["session_url"]
+
+
+def test_throughput_excludes_running_sessions_from_the_delivery_rate(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """A session still running is not evidence of failure, so it cannot sit in the denominator."""
+    seed(store, scope)
+
+    throughput = throughput_payload(store, REPO, cost_series=fake_cost_series)
+    delivered = int(cast(int, throughput["delivered"]))
+    settled = (
+        delivered + int(cast(int, throughput["escalated"])) + int(cast(int, throughput["errored"]))
+    )
+    daily = cast(list[dict[str, int]], throughput["daily"])
+
+    assert throughput["sessions_started"] == settled + int(cast(int, throughput["in_flight"]))
+    assert throughput["delivery_rate"] == pytest.approx(delivered / settled, abs=1e-3)
+    assert sum(day["started"] for day in daily) == throughput["sessions_started"]
+
+
+def test_the_debt_claim_never_compares_across_a_ruleset_change(
+    store: FactStore, scope: ScopeConfig
+) -> None:
+    """The last point is not comparable to its predecessor, so the claim must not span the break."""
+    seed(store, scope)
+    throughput = throughput_payload(store, REPO, cost_series=fake_cost_series)
+
+    debt, cost, shipped = thesis_payload(
+        store, REPO, throughput, debt_series=fake_debt_series, cost_series=fake_cost_series
+    )
+
+    assert debt["status"] == "not yet comparable"
+    assert debt["value"] == 92
+    assert "from" not in debt
+    assert cost["status"] == "improving"
+    assert shipped["unit"] == "issues shipped"
+
+
+def test_a_claim_with_no_measurements_reads_as_unproven_rather_than_achieved() -> None:
+    def no_debt(store: FactStore, repo: str) -> list[FakeDebtPoint]:
+        return []
+
+    def no_cost(store: FactStore, repo: str, period: str = "week") -> list[FakeCostPoint]:
+        return []
+
+    store = FactStore(":memory:")
+    throughput = throughput_payload(store, REPO, cost_series=no_cost)
+
+    claims = thesis_payload(store, REPO, throughput, debt_series=no_debt, cost_series=no_cost)
+
+    assert [claim["status"] for claim in claims] == ["no data", "no data", "no data"]
+    assert throughput["delivery_rate"] is None
+    assert throughput["acus_per_delivered_pr"] is None
+
+
 def test_outbox_payload_links_every_row_to_its_pull_request(
     store: FactStore, scope: ScopeConfig
 ) -> None:
@@ -211,7 +287,18 @@ def test_dashboard_payload_has_every_section(store: FactStore, scope: ScopeConfi
     payload = dashboard_payload(
         store, REPO, debt_series=fake_debt_series, cost_series=fake_cost_series
     )
-    assert {"repo", "debt", "ci_cost", "flow", "funnel", "outbox"} <= set(payload)
+    assert {
+        "repo",
+        "generated_at",
+        "thesis",
+        "throughput",
+        "debt",
+        "ci_cost",
+        "flow",
+        "fleet",
+        "funnel",
+        "outbox",
+    } <= set(payload)
 
 
 def test_router_serves_the_page_and_one_data_document(
